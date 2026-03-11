@@ -1,0 +1,136 @@
+# dtx v2 - Web App Example
+# Full-stack application with database, cache, API, worker, and frontend
+
+project:
+  name: web-app
+  description: Full-stack web application example
+
+settings:
+  log_level: info
+  health_check_interval: 5s
+  shutdown_timeout: 30s
+
+server:
+  port: 3001
+  host: 127.0.0.1
+
+middleware:
+  logging:
+    enabled: true
+    level: info
+    format: json
+  metrics:
+    enabled: true
+    endpoint: /metrics
+    port: 9090
+  tracing:
+    enabled: false
+    endpoint: http://localhost:4317
+    service_name: web-app
+
+health:
+  interval: 5s
+  timeout: 10s
+  retries: 3
+
+restart:
+  policy: on-failure
+  max_retries: 3
+  backoff_initial: 1s
+  backoff_max: 30s
+  backoff_multiplier: 2.0
+
+resources:
+  # =============================================================================
+  # DATABASE: PostgreSQL
+  # =============================================================================
+  postgres:
+    kind: process
+    command: postgres -D ${PGDATA}
+    port: 5432
+    environment:
+      PGDATA: ./.dtx/data/postgres
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: development
+      POSTGRES_DB: webapp
+    health:
+      exec: pg_isready -h 127.0.0.1 -p 5432
+      interval: 2s
+      timeout: 5s
+      retries: 5
+    restart: on-failure
+
+  # =============================================================================
+  # CACHE: Redis
+  # =============================================================================
+  redis:
+    kind: process
+    command: redis-server --port 6379 --dir ./.dtx/data/redis
+    port: 6379
+    health:
+      tcp: 127.0.0.1:6379
+      interval: 1s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # BACKEND: API Server
+  # =============================================================================
+  api:
+    kind: process
+    command: npm run dev
+    port: 3000
+    working_dir: ./api
+    depends_on:
+      - postgres: healthy
+      - redis: started
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://app:development@localhost:5432/webapp
+      REDIS_URL: redis://localhost:6379
+      LOG_LEVEL: debug
+    health:
+      http:
+        path: /health
+        port: 3000
+      interval: 3s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # WORKER: Background Job Processor
+  # =============================================================================
+  worker:
+    kind: process
+    command: npm run worker
+    working_dir: ./api
+    depends_on:
+      - postgres: healthy
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://app:development@localhost:5432/webapp
+      REDIS_URL: redis://localhost:6379
+      WORKER_CONCURRENCY: 2
+    restart: on-failure
+
+  # =============================================================================
+  # FRONTEND: Vite Dev Server
+  # =============================================================================
+  frontend:
+    kind: process
+    command: npm run dev
+    port: 5173
+    working_dir: ./frontend
+    depends_on:
+      - api: healthy
+    environment:
+      VITE_API_URL: http://localhost:3000
+    health:
+      http:
+        path: /
+        port: 5173
+      interval: 5s
+      timeout: 10s
+    restart: on-failure
