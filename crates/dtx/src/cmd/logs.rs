@@ -66,7 +66,8 @@ async fn stream_logs_sse(out: &Output, project_id: &str, service: Option<&str>) 
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                out.step("logs").fail_untimed(&format!("HTTP {} — {}", status, body.trim()));
+                out.step("logs")
+                    .fail_untimed(&format!("HTTP {} — {}", status, body.trim()));
                 return Ok(());
             }
 
@@ -104,7 +105,10 @@ async fn stream_logs_sse(out: &Output, project_id: &str, service: Option<&str>) 
         }
         Err(e) => {
             if e.is_connect() {
-                out.step("logs").fail_untimed(&format!("can't reach web server on port {}", DEFAULT_WEB_PORT));
+                out.step("logs").fail_untimed(&format!(
+                    "can't reach web server on port {}",
+                    DEFAULT_WEB_PORT
+                ));
                 Ok(())
             } else {
                 out.step("logs").fail_untimed(&format!("{}", e));

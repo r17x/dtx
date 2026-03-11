@@ -1,6 +1,6 @@
 //! HTMX partial handlers.
 
-use askama::Template;
+use askama_axum::Template;
 use axum::extract::{Path, Query, State};
 use axum::Form;
 use dtx_core::config::schema::ResourceConfig;
@@ -70,9 +70,7 @@ pub struct StatusPanelTemplate {
 }
 
 /// Render the status panel partial.
-pub async fn status_panel(
-    State(state): State<AppState>,
-) -> AppResult<StatusPanelTemplate> {
+pub async fn status_panel(State(state): State<AppState>) -> AppResult<StatusPanelTemplate> {
     let orch = state.orchestrator.read().await;
     let running = orch.as_ref().map(|o| o.is_running()).unwrap_or(false);
     let status = if running {
@@ -167,9 +165,7 @@ pub struct LogsPanelLiveTemplate {
 }
 
 /// Render the live logs panel partial with SSE support.
-pub async fn logs_panel_live(
-    Path(service): Path<String>,
-) -> AppResult<LogsPanelLiveTemplate> {
+pub async fn logs_panel_live(Path(service): Path<String>) -> AppResult<LogsPanelLiveTemplate> {
     Ok(LogsPanelLiveTemplate { service })
 }
 
@@ -216,16 +212,16 @@ pub async fn create_service(
         }
     }
 
-    let mut rc = ResourceConfig::default();
-    rc.command = Some(form.command);
-    rc.port = form.port;
     let pkg = form.package.filter(|s| !s.is_empty());
-    if let Some(ref p) = pkg {
-        rc.nix = Some(dtx_core::config::schema::NixConfig {
+    let rc = ResourceConfig {
+        command: Some(form.command),
+        port: form.port,
+        nix: pkg.as_ref().map(|p| dtx_core::config::schema::NixConfig {
             packages: vec![p.clone()],
             ..Default::default()
-        });
-    }
+        }),
+        ..Default::default()
+    };
 
     let mut store = state.store.write().await;
     store.add_resource(&form.name, rc).map_err(AppError::from)?;
@@ -252,7 +248,9 @@ pub async fn delete_service(
 ) -> AppResult<ServicesListTemplate> {
     let mut store = state.store.write().await;
 
-    let removed_rc = store.remove_resource(&service_name).map_err(AppError::from)?;
+    let removed_rc = store
+        .remove_resource(&service_name)
+        .map_err(AppError::from)?;
 
     // Sync flake.nix if the removed service had a package
     let removed_package = removed_rc
@@ -263,9 +261,7 @@ pub async fn delete_service(
         let project_root = store.project_root().to_path_buf();
         let remaining_packages: HashSet<String> = store
             .list_resources()
-            .filter_map(|(_, rc)| {
-                rc.nix.as_ref().and_then(|n| n.packages.first().cloned())
-            })
+            .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
             .collect();
         if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
             tracing::warn!("Failed to sync flake.nix: {}", e);
@@ -319,12 +315,14 @@ pub async fn add_package(
     let mut store = state.store.write().await;
     let project_name = store.project_name().to_string();
 
-    let mut rc = ResourceConfig::default();
-    rc.command = Some(form.package.clone());
-    rc.nix = Some(dtx_core::config::schema::NixConfig {
-        packages: vec![form.package.clone()],
+    let rc = ResourceConfig {
+        command: Some(form.package.clone()),
+        nix: Some(dtx_core::config::schema::NixConfig {
+            packages: vec![form.package.clone()],
+            ..Default::default()
+        }),
         ..Default::default()
-    });
+    };
 
     store
         .add_resource(&form.package, rc)
@@ -369,9 +367,7 @@ pub struct MappingsPanelTemplate {
 }
 
 /// Render the mappings panel partial.
-pub async fn mappings_panel(
-    State(state): State<AppState>,
-) -> AppResult<MappingsPanelTemplate> {
+pub async fn mappings_panel(State(state): State<AppState>) -> AppResult<MappingsPanelTemplate> {
     let store = state.store.read().await;
     let services = dtx_core::model::services_from_config(store.config());
 

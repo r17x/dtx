@@ -136,7 +136,6 @@ pub fn analyze_services(services: &[Service]) -> Vec<PreflightCheck> {
                 .or_default()
                 .push(service.name.clone());
         }
-
     }
 
     // Generate local script checks (file exists)

@@ -147,10 +147,7 @@ impl Service {
     pub fn from_resource_config(name: &str, rc: &ResourceConfig) -> Self {
         use crate::config::schema::DependencyConfig;
 
-        let package = rc
-            .nix
-            .as_ref()
-            .and_then(|n| n.packages.first().cloned());
+        let package = rc.nix.as_ref().and_then(|n| n.packages.first().cloned());
 
         let depends_on = if rc.depends_on.is_empty() {
             None
@@ -231,7 +228,12 @@ impl Service {
         let environment = if rc.environment.is_empty() {
             None
         } else {
-            Some(rc.environment.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            Some(
+                rc.environment
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )
         };
 
         Self {
@@ -239,7 +241,10 @@ impl Service {
             command: rc.command.clone().unwrap_or_default(),
             package,
             port: rc.port,
-            working_dir: rc.working_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+            working_dir: rc
+                .working_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             environment,
             depends_on,
             health_check,

@@ -320,11 +320,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ConfigStore::init(dir.path().to_path_buf(), "test").unwrap();
 
-        store.add_resource("api", ResourceConfig {
-            command: Some("npm start".to_string()),
-            port: Some(3000),
-            ..Default::default()
-        }).unwrap();
+        store
+            .add_resource(
+                "api",
+                ResourceConfig {
+                    command: Some("npm start".to_string()),
+                    port: Some(3000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         store.save().unwrap();
 
         // Reload and verify
@@ -340,16 +345,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ConfigStore::init(dir.path().to_path_buf(), "test").unwrap();
 
-        store.add_resource("api", ResourceConfig {
-            command: Some("npm start".to_string()),
-            port: Some(3000),
-            ..Default::default()
-        }).unwrap();
-        store.add_resource("db", ResourceConfig {
-            command: Some("postgres".to_string()),
-            port: Some(5432),
-            ..Default::default()
-        }).unwrap();
+        store
+            .add_resource(
+                "api",
+                ResourceConfig {
+                    command: Some("npm start".to_string()),
+                    port: Some(3000),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .add_resource(
+                "db",
+                ResourceConfig {
+                    command: Some("postgres".to_string()),
+                    port: Some(5432),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         store.save().unwrap();
         let content1 = std::fs::read_to_string(dir.path().join(".dtx/config.yaml")).unwrap();
@@ -365,16 +380,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ConfigStore::init(dir.path().to_path_buf(), "test").unwrap();
 
-        store.add_resource("api", ResourceConfig {
-            command: Some("npm start".to_string()),
-            enabled: true,
-            ..Default::default()
-        }).unwrap();
-        store.add_resource("worker", ResourceConfig {
-            command: Some("worker run".to_string()),
-            enabled: false,
-            ..Default::default()
-        }).unwrap();
+        store
+            .add_resource(
+                "api",
+                ResourceConfig {
+                    command: Some("npm start".to_string()),
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .add_resource(
+                "worker",
+                ResourceConfig {
+                    command: Some("worker run".to_string()),
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         let enabled: Vec<_> = store.list_enabled_resources().collect();
         assert_eq!(enabled.len(), 1);

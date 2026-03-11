@@ -107,7 +107,8 @@ pub async fn shell(ctx: &Context, out: &Output, command: Option<String>) -> Resu
             }
         }
         None => {
-            out.step("shell").done_untimed(&format!("interactive ({})", project_name));
+            out.step("shell")
+                .done_untimed(&format!("interactive ({})", project_name));
             out.raw("(Use 'exit' to leave the shell)\n");
             out.blank();
 

@@ -4,6 +4,7 @@
 # === Root files ===
 !.gitignore
 !.cursor/
+!.github/
 !.mcp.json
 !Cargo.toml
 !Cargo.lock

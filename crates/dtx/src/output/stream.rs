@@ -18,7 +18,11 @@ pub fn render_log(
         if caps.color {
             let content_color = if is_stderr { "\x1b[31m" } else { "" };
             let reset = if is_stderr { "\x1b[0m" } else { "" };
-            let _ = writeln!(w, "\x1b[36m[{}]\x1b[0m {}{}{}", service, content_color, line, reset);
+            let _ = writeln!(
+                w,
+                "\x1b[36m[{}]\x1b[0m {}{}{}",
+                service, content_color, line, reset
+            );
         } else {
             let _ = writeln!(w, "[{}] {}", service, line);
         }

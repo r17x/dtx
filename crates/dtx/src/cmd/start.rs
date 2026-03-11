@@ -45,9 +45,10 @@ pub async fn run(
     // === Validate dependency graph before generation ===
     if let Err(validation_errors) = GraphValidator::validate_all(&services) {
         for err in &validation_errors {
-            out.error_detail(&format!("{}", err), &[], None);
+            out.error_detail(&err.to_string(), &[], None);
         }
-        out.step("graph").fail_untimed(&format!("{} error(s)", validation_errors.len()));
+        out.step("graph")
+            .fail_untimed(&format!("{} error(s)", validation_errors.len()));
         return Ok(());
     }
 
@@ -94,25 +95,25 @@ pub async fn run(
     };
 
     // Step 1: nix environment
-    let nix_env: Option<HashMap<String, String>> =
-        if effective_flake_dir.join("flake.nix").exists() {
-            pipe.animate(1, "loading");
-            match DevEnvironment::from_flake(&effective_flake_dir).await {
-                Ok(env) => {
-                    pipe.done(1, &format!("{} vars", env.var_count()));
-                    Some(env.env_vars)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to extract Nix environment: {}", e);
-                    pipe.fail(1, &format!("{}", e));
-                    deferred_warnings.push("Services will use system PATH instead.".into());
-                    None
-                }
+    let nix_env: Option<HashMap<String, String>> = if effective_flake_dir.join("flake.nix").exists()
+    {
+        pipe.animate(1, "loading");
+        match DevEnvironment::from_flake(&effective_flake_dir).await {
+            Ok(env) => {
+                pipe.done(1, &format!("{} vars", env.var_count()));
+                Some(env.env_vars)
             }
-        } else {
-            pipe.done_untimed(1, "skipped");
-            None
-        };
+            Err(e) => {
+                tracing::warn!("Failed to extract Nix environment: {}", e);
+                pipe.fail(1, &format!("{}", e));
+                deferred_warnings.push("Services will use system PATH instead.".into());
+                None
+            }
+        }
+    } else {
+        pipe.done_untimed(1, "skipped");
+        None
+    };
 
     // Step 2: pre-flight checks
     let nix_path = nix_env.as_ref().and_then(|env| env.get("PATH").cloned());
@@ -122,7 +123,10 @@ pub async fn run(
 
     if !preflight_result.is_ok() {
         let total = preflight_result.passed.len() + preflight_result.failed.len();
-        pipe.fail(2, &format!("{}/{} failed", preflight_result.failed.len(), total));
+        pipe.fail(
+            2,
+            &format!("{}/{} failed", preflight_result.failed.len(), total),
+        );
         pipe.finish();
         for check in &preflight_result.failed {
             let mut details: Vec<(&str, &str)> = Vec::new();
@@ -130,11 +134,7 @@ pub async fn run(
             if !check.required_by.is_empty() {
                 details.push(("required by", &required_by));
             }
-            out.error_detail(
-                &check.description,
-                &details,
-                check.fix_hint.as_deref(),
-            );
+            out.error_detail(&check.description, &details, check.fix_hint.as_deref());
         }
         return Ok(());
     }
@@ -145,30 +145,70 @@ pub async fn run(
     // Collect unmapped service warnings (deferred until after pipeline)
     collect_unmapped_warnings(&services, &mut deferred_warnings);
 
-    run_with_native_backend(out, &services, project_root, effective_flake_dir, nix_env, foreground, pipe, deferred_warnings)
-        .await
+    run_with_native_backend(
+        out,
+        &services,
+        NativeBackendParams {
+            project_root,
+            flake_dir: effective_flake_dir,
+            nix_env,
+            foreground,
+            pipe,
+            deferred_warnings,
+        },
+    )
+    .await
+}
+
+/// Parameters for the native backend runner.
+struct NativeBackendParams {
+    project_root: PathBuf,
+    flake_dir: PathBuf,
+    nix_env: Option<HashMap<String, String>>,
+    foreground: bool,
+    pipe: crate::output::Pipeline,
+    deferred_warnings: Vec<String>,
 }
 
 /// Run services using the Orchestrator (unified process management).
 async fn run_with_native_backend(
     out: &Output,
     services: &[ModelService],
-    project_root: PathBuf,
-    flake_dir: PathBuf,
-    nix_env: Option<HashMap<String, String>>,
-    foreground: bool,
-    mut pipe: crate::output::Pipeline,
-    deferred_warnings: Vec<String>,
+    params: NativeBackendParams,
 ) -> Result<()> {
+    let NativeBackendParams {
+        project_root,
+        flake_dir,
+        nix_env,
+        foreground,
+        mut pipe,
+        deferred_warnings,
+    } = params;
     if foreground {
-        run_foreground(out, services, project_root, flake_dir, nix_env, pipe, deferred_warnings).await
+        run_foreground(
+            out,
+            services,
+            project_root,
+            flake_dir,
+            nix_env,
+            pipe,
+            deferred_warnings,
+        )
+        .await
     } else {
         pipe.done_untimed(3, &format!("{} ready", services.len()));
         pipe.finish();
         for w in &deferred_warnings {
             out.warning(w);
         }
-        crate::tui::run_tui(out, services.to_vec(), project_root, Some(flake_dir), nix_env).await
+        crate::tui::run_tui(
+            out,
+            services.to_vec(),
+            project_root,
+            Some(flake_dir),
+            nix_env,
+        )
+        .await
     }
 }
 
@@ -207,7 +247,10 @@ async fn run_foreground(
     let started = result.started.len();
     let failed_count = result.failed.len();
     if failed_count > 0 {
-        pipe.fail(3, &format!("{}/{} failed", failed_count, started + failed_count));
+        pipe.fail(
+            3,
+            &format!("{}/{} failed", failed_count, started + failed_count),
+        );
     } else {
         pipe.done(3, &format!("{} started", started));
     }
@@ -223,7 +266,7 @@ async fn run_foreground(
         out.step_child(id.as_str()).done_untimed("started");
     }
     for (id, err) in &result.failed {
-        out.step_child(id.as_str()).fail_untimed(&format!("{}", err));
+        out.step_child(id.as_str()).fail_untimed(&err.to_string());
     }
 
     out.separator("logs (ctrl+c to stop)");
@@ -305,9 +348,7 @@ fn collect_unmapped_warnings(services: &[ModelService], warnings: &mut Vec<Strin
     let unmapped: Vec<_> = services
         .iter()
         .filter(|s| s.enabled)
-        .filter(|s| {
-            s.package.is_none() && dtx_core::infer_package(&s.command).is_none()
-        })
+        .filter(|s| s.package.is_none() && dtx_core::infer_package(&s.command).is_none())
         .collect();
 
     if !unmapped.is_empty() {

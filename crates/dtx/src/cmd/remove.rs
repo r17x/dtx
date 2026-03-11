@@ -48,11 +48,7 @@ pub fn run(ctx: &mut Context, out: &Output, name: String, yes: bool) -> Result<(
         let remaining_packages: HashSet<String> = ctx
             .store
             .list_resources()
-            .filter_map(|(_, r)| {
-                r.nix
-                    .as_ref()
-                    .and_then(|n| n.packages.first().cloned())
-            })
+            .filter_map(|(_, r)| r.nix.as_ref().and_then(|n| n.packages.first().cloned()))
             .collect();
         let project_root = ctx.store.project_root();
         match dtx_core::sync_remove_package(project_root, pkg, &remaining_packages) {

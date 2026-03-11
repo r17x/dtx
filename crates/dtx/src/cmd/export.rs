@@ -91,10 +91,7 @@ fn export_kubernetes(ctx: &Context, out: &Output, opts: &ExportOptions) -> Resul
 }
 
 /// Get model services from config store, with optional filter.
-fn get_model_services(
-    ctx: &Context,
-    filter: &Option<Vec<String>>,
-) -> Result<Vec<ModelService>> {
+fn get_model_services(ctx: &Context, filter: &Option<Vec<String>>) -> Result<Vec<ModelService>> {
     let services: Vec<ModelService> = ctx
         .store
         .list_resources()

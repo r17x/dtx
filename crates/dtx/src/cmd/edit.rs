@@ -4,9 +4,7 @@ use super::parsers;
 use crate::context::Context;
 use crate::output::Output;
 use anyhow::{bail, Result};
-use dtx_core::config::schema::{
-    DependencyConditionConfig, DependencyConfig, RestartConfig,
-};
+use dtx_core::config::schema::{DependencyConditionConfig, DependencyConfig, RestartConfig};
 use dtx_core::{Environment, Port, ShellCommand};
 use indexmap::IndexMap;
 
@@ -47,7 +45,8 @@ pub fn run(ctx: &mut Context, out: &Output, args: EditArgs) -> Result<()> {
 
     // Validate conflicting flags
     if enable && disable {
-        out.step(&name).fail_untimed("cannot use both --enable and --disable");
+        out.step(&name)
+            .fail_untimed("cannot use both --enable and --disable");
         return Ok(());
     }
 
@@ -128,7 +127,7 @@ pub fn run(ctx: &mut Context, out: &Output, args: EditArgs) -> Result<()> {
     // Handle restart policy
     let restart_policy = restart
         .as_deref()
-        .map(|s| parsers::parse_restart_policy(s))
+        .map(parsers::parse_restart_policy)
         .transpose()?;
     if let Some(policy) = restart_policy.clone() {
         resource.restart = Some(RestartConfig::Simple(policy));
@@ -141,7 +140,11 @@ pub fn run(ctx: &mut Context, out: &Output, args: EditArgs) -> Result<()> {
     let mut grp = out.group(&name);
 
     if command_changed {
-        if let Some(ref cmd) = ctx.store.get_resource(&name).and_then(|r| r.command.as_ref()) {
+        if let Some(cmd) = ctx
+            .store
+            .get_resource(&name)
+            .and_then(|r| r.command.as_ref())
+        {
             grp.child_done("command", cmd);
         }
     }
@@ -151,8 +154,12 @@ pub fn run(ctx: &mut Context, out: &Output, args: EditArgs) -> Result<()> {
         }
     }
     if working_dir_changed {
-        if let Some(ref wd) = ctx.store.get_resource(&name).and_then(|r| r.working_dir.as_ref()) {
-            grp.child_done("working directory", &format!("{}", wd.display()));
+        if let Some(wd) = ctx
+            .store
+            .get_resource(&name)
+            .and_then(|r| r.working_dir.as_ref())
+        {
+            grp.child_done("working directory", &wd.display().to_string());
         }
     }
     if !add_env.is_empty() || !remove_env.is_empty() {

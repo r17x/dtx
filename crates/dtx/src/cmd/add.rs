@@ -83,7 +83,10 @@ fn parse_kind(s: &str) -> Result<ResourceKindConfig> {
         "container" => Ok(ResourceKindConfig::Container),
         "vm" => Ok(ResourceKindConfig::Vm),
         "agent" => Ok(ResourceKindConfig::Agent),
-        _ => bail!("Unknown kind '{}'. Use: process, container, vm, or agent", s),
+        _ => bail!(
+            "Unknown kind '{}'. Use: process, container, vm, or agent",
+            s
+        ),
     }
 }
 
@@ -99,10 +102,16 @@ fn validate_kind_flags(kind: &ResourceKindConfig, args: &AddArgs) -> Result<()> 
     // Container-only flags
     if !matches!(kind, ResourceKindConfig::Container) {
         if args.image.is_some() {
-            bail!("--image is only valid for container kind (got --kind {})", kind_label);
+            bail!(
+                "--image is only valid for container kind (got --kind {})",
+                kind_label
+            );
         }
         if !args.volumes.is_empty() {
-            bail!("--volume is only valid for container kind (got --kind {})", kind_label);
+            bail!(
+                "--volume is only valid for container kind (got --kind {})",
+                kind_label
+            );
         }
     }
 
@@ -115,31 +124,50 @@ fn validate_kind_flags(kind: &ResourceKindConfig, args: &AddArgs) -> Result<()> 
             ("--nixos", args.nixos.as_ref()),
         ] {
             if val.is_some() {
-                bail!("{} is only valid for vm kind (got --kind {})", flag, kind_label);
+                bail!(
+                    "{} is only valid for vm kind (got --kind {})",
+                    flag,
+                    kind_label
+                );
             }
         }
         if args.cpus.is_some() {
-            bail!("--cpus is only valid for vm kind (got --kind {})", kind_label);
+            bail!(
+                "--cpus is only valid for vm kind (got --kind {})",
+                kind_label
+            );
         }
     }
 
     // Agent-only flags
     if !matches!(kind, ResourceKindConfig::Agent) {
         if args.runtime.is_some() {
-            bail!("--runtime is only valid for agent kind (got --kind {})", kind_label);
+            bail!(
+                "--runtime is only valid for agent kind (got --kind {})",
+                kind_label
+            );
         }
         if args.model.is_some() {
-            bail!("--model is only valid for agent kind (got --kind {})", kind_label);
+            bail!(
+                "--model is only valid for agent kind (got --kind {})",
+                kind_label
+            );
         }
         if !args.tools.is_empty() {
-            bail!("--tool is only valid for agent kind (got --kind {})", kind_label);
+            bail!(
+                "--tool is only valid for agent kind (got --kind {})",
+                kind_label
+            );
         }
     }
 
     // Process/container-only: package inference
     if matches!(kind, ResourceKindConfig::Vm | ResourceKindConfig::Agent) && args.package.is_some()
     {
-        bail!("--package is only valid for process/container kind (got --kind {})", kind_label);
+        bail!(
+            "--package is only valid for process/container kind (got --kind {})",
+            kind_label
+        );
     }
 
     Ok(())
@@ -230,7 +258,7 @@ pub fn run(ctx: &mut Context, out: &Output, args: AddArgs) -> Result<()> {
     // Parse restart policy
     let restart_config = restart
         .as_deref()
-        .map(|s| parsers::parse_restart_policy(s))
+        .map(parsers::parse_restart_policy)
         .transpose()?
         .map(RestartConfig::Simple);
 
@@ -365,13 +393,21 @@ pub fn run(ctx: &mut Context, out: &Output, args: AddArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolved process context: (command, package, port, nix config).
+type ProcessContext = (
+    Option<String>,
+    Option<String>,
+    Option<u16>,
+    Option<NixConfig>,
+);
+
 /// Build process/container context: resolve command, package, port, and nix config.
 fn build_process_context(
     command: Option<String>,
     package: Option<String>,
     port: Option<u16>,
     name: &str,
-) -> Result<(Option<String>, Option<String>, Option<u16>, Option<NixConfig>)> {
+) -> Result<ProcessContext> {
     // Package inference
     let resolved_package = match package {
         Some(pkg) => Some(pkg),
@@ -403,16 +439,9 @@ fn build_process_context(
     // Command resolution
     let resolved_command = match command {
         Some(cmd) => Some(cmd),
-        None => {
-            if let Some(ref pkg) = resolved_package {
-                Some(
-                    default_command_for_package(pkg, resolved_port)
-                        .unwrap_or_else(|| name.to_string()),
-                )
-            } else {
-                None
-            }
-        }
+        None => resolved_package.as_ref().map(|pkg| {
+            default_command_for_package(pkg, resolved_port).unwrap_or_else(|| name.to_string())
+        }),
     };
 
     // Build nix config if package is set

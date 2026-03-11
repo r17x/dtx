@@ -231,7 +231,7 @@ impl Signal {
 }
 
 /// Restart policy.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 pub enum RestartPolicy {
     /// Always restart.
@@ -249,13 +249,8 @@ pub enum RestartPolicy {
         backoff: BackoffConfig,
     },
     /// Never restart.
+    #[default]
     No,
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self::No
-    }
 }
 
 impl RestartPolicy {
@@ -540,9 +535,7 @@ fn health_config_to_probe(
 }
 
 /// Convert a schema RestartConfig to a process RestartPolicy.
-fn restart_config_to_policy(
-    restart: &dtx_core::config::schema::RestartConfig,
-) -> RestartPolicy {
+fn restart_config_to_policy(restart: &dtx_core::config::schema::RestartConfig) -> RestartPolicy {
     use dtx_core::config::schema::RestartPolicy as SchemaPolicy;
 
     let (policy, max_retries, backoff_str) = match restart {
@@ -654,8 +647,11 @@ mod tests {
             ..Default::default()
         };
 
-        let config =
-            ProcessResourceConfig::from_resource_config("api", &resource, std::path::Path::new("/project"));
+        let config = ProcessResourceConfig::from_resource_config(
+            "api",
+            &resource,
+            std::path::Path::new("/project"),
+        );
 
         assert_eq!(config.id.as_str(), "api");
         assert_eq!(config.command, "npm start");
@@ -671,7 +667,12 @@ mod tests {
         // Readiness probe (HTTP)
         let probe = config.readiness_probe.unwrap();
         match probe {
-            ProbeConfig::HttpGet { port, path, settings, .. } => {
+            ProbeConfig::HttpGet {
+                port,
+                path,
+                settings,
+                ..
+            } => {
                 assert_eq!(port, 3000);
                 assert_eq!(path, "/health");
                 assert_eq!(settings.period, Duration::from_secs(10));
@@ -693,7 +694,10 @@ mod tests {
 
         // Restart policy
         match config.restart {
-            RestartPolicy::OnFailure { max_retries, backoff } => {
+            RestartPolicy::OnFailure {
+                max_retries,
+                backoff,
+            } => {
                 assert_eq!(max_retries, Some(3));
                 assert_eq!(backoff.initial_delay, Duration::from_secs(2));
             }

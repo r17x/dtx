@@ -33,3 +33,6 @@ mime_guess = "2"
 [dev-dependencies]
 tempfile = { workspace = true }
 axum-test = "15.0"
+
+[lints]
+workspace = true

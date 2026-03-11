@@ -1,0 +1,350 @@
+on: # disabled for now
+  workflow_dispatch_disabled:
+    inputs:
+      version:
+        description: "Version to release (format: vX.Y.Z)"
+        required: true
+      upload:
+        description: "Upload artifacts to GitHub Release"
+        type: boolean
+        default: false
+
+  # push:
+  #   tags:
+  #     - "v[0-9]+.[0-9]+.[0-9]+"
+
+name: Release
+
+# Only run one release workflow at a time to prevent artifact corruption
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # =============================================================================
+  # Setup: Extract version and build metadata
+  # =============================================================================
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+      version_tag: ${{ steps.extract_version.outputs.version_tag }}
+      commit: ${{ steps.extract_build_info.outputs.commit }}
+      commit_long: ${{ steps.extract_build_info.outputs.commit_long }}
+      build_number: ${{ steps.extract_build_info.outputs.build_number }}
+    steps:
+      - name: Validate Version Input
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Version must follow the format vX.Y.Z (e.g., v1.0.0)"
+            exit 1
+          fi
+          echo "Version is valid: ${{ github.event.inputs.version }}"
+
+      - name: Extract Version
+        id: extract_version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION_TAG=${GITHUB_REF#refs/tags/}
+            VERSION=${VERSION_TAG#v}
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION_TAG=${{ github.event.inputs.version }}
+            VERSION=${VERSION_TAG#v}
+          else
+            echo "Error: Unsupported event type"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION (tag: $VERSION_TAG)"
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract Build Info
+        id: extract_build_info
+        run: |
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          COMMIT=$(git rev-parse --short HEAD)
+          COMMIT_LONG=$(git rev-parse HEAD)
+          echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "commit_long=$COMMIT_LONG" >> $GITHUB_OUTPUT
+          echo "Build: $BUILD_NUMBER, Commit: $COMMIT"
+
+  # =============================================================================
+  # Build: Linux (x86_64 and aarch64)
+  # =============================================================================
+  build-linux:
+    needs: [setup]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      DTX_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+        continue-on-error: true
+
+      - name: Build dtx
+        run: |
+          nix build .#packages.${{ matrix.system }}.dtx --print-build-logs
+
+      - name: Package Binary
+        run: |
+          mkdir -p dist
+          cp result/bin/dtx dist/
+          cd dist
+          tar czf dtx-${{ matrix.arch }}-unknown-linux-gnu.tar.gz dtx
+          sha256sum dtx-${{ matrix.arch }}-unknown-linux-gnu.tar.gz > dtx-${{ matrix.arch }}-unknown-linux-gnu.tar.gz.sha256
+          rm dtx
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  # =============================================================================
+  # Build: macOS (x86_64 and aarch64)
+  # =============================================================================
+  build-macos:
+    needs: [setup]
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            system: x86_64-darwin
+            arch: x86_64
+          - runner: macos-14
+            system: aarch64-darwin
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      DTX_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+        continue-on-error: true
+
+      - name: Build dtx
+        run: |
+          nix build .#packages.${{ matrix.system }}.dtx --print-build-logs
+
+      - name: Package Binary
+        run: |
+          mkdir -p dist
+          cp result/bin/dtx dist/
+          cd dist
+          tar czf dtx-${{ matrix.arch }}-apple-darwin.tar.gz dtx
+          shasum -a 256 dtx-${{ matrix.arch }}-apple-darwin.tar.gz > dtx-${{ matrix.arch }}-apple-darwin.tar.gz.sha256
+          rm dtx
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+
+  # =============================================================================
+  # Source Tarball
+  # =============================================================================
+  source-tarball:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    env:
+      DTX_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create Source Tarball
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix=dtx-${DTX_VERSION}/ -o dist/dtx-${DTX_VERSION}-source.tar.gz HEAD
+          cd dist
+          sha256sum dtx-${DTX_VERSION}-source.tar.gz > dtx-${DTX_VERSION}-source.tar.gz.sha256
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-tarball
+          path: dist/*
+
+  # =============================================================================
+  # Checksums: Generate combined checksums file
+  # =============================================================================
+  checksums:
+    needs: [setup, build-linux, build-macos, source-tarball]
+    runs-on: ubuntu-latest
+    env:
+      DTX_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate Combined Checksums
+        run: |
+          mkdir -p dist
+          cd artifacts
+          find . -name "*.sha256" -exec cat {} \; > ../dist/dtx-${DTX_VERSION}-checksums.txt
+          cat ../dist/dtx-${DTX_VERSION}-checksums.txt
+
+      - name: Upload Checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/*
+
+  # =============================================================================
+  # Release: Create GitHub Release
+  # =============================================================================
+  release:
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.upload == 'true') ||
+      github.event_name == 'push'
+    needs: [setup, build-linux, build-macos, source-tarball, checksums]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DTX_VERSION: ${{ needs.setup.outputs.version }}
+      DTX_VERSION_TAG: ${{ needs.setup.outputs.version_tag }}
+      DTX_COMMIT: ${{ needs.setup.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare Release Assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" -o -name "*checksums.txt" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Generate Release Notes
+        run: |
+          cat << EOF > release_notes.md
+          ## dtx ${DTX_VERSION_TAG}
+
+          ### Installation
+
+          #### Nix Flake (Recommended)
+          \`\`\`bash
+          # Run directly
+          nix run github:r17x/dtx/${DTX_VERSION_TAG}
+
+          # Install to profile
+          nix profile install github:r17x/dtx/${DTX_VERSION_TAG}
+          \`\`\`
+
+          #### Pre-built Binaries
+
+          **Linux (x86_64)**
+          \`\`\`bash
+          curl -L https://github.com/r17x/dtx/releases/download/${DTX_VERSION_TAG}/dtx-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv dtx /usr/local/bin/
+          \`\`\`
+
+          **Linux (aarch64)**
+          \`\`\`bash
+          curl -L https://github.com/r17x/dtx/releases/download/${DTX_VERSION_TAG}/dtx-aarch64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv dtx /usr/local/bin/
+          \`\`\`
+
+          **macOS (Apple Silicon)**
+          \`\`\`bash
+          curl -L https://github.com/r17x/dtx/releases/download/${DTX_VERSION_TAG}/dtx-aarch64-apple-darwin.tar.gz | tar xz
+          sudo mv dtx /usr/local/bin/
+          \`\`\`
+
+          **macOS (Intel)**
+          \`\`\`bash
+          curl -L https://github.com/r17x/dtx/releases/download/${DTX_VERSION_TAG}/dtx-x86_64-apple-darwin.tar.gz | tar xz
+          sudo mv dtx /usr/local/bin/
+          \`\`\`
+
+          ### Checksums
+
+          See \`dtx-${DTX_VERSION}-checksums.txt\` for SHA256 checksums of all artifacts.
+
+          ### Build Info
+
+          - **Version**: ${DTX_VERSION}
+          - **Commit**: ${DTX_COMMIT}
+
+          ---
+
+          **Full Changelog**: https://github.com/r17x/dtx/compare/...${DTX_VERSION_TAG}
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.DTX_VERSION_TAG }}
+          name: dtx ${{ env.DTX_VERSION_TAG }}
+          body_path: release_notes.md
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =============================================================================
+  # Cachix: Push build results to Cachix
+  # =============================================================================
+  push-cachix:
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.upload == 'true') ||
+      github.event_name == 'push'
+    needs: [setup, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+        continue-on-error: true
+
+      - name: Push to Cachix
+        run: |
+          nix build .#packages.x86_64-linux.dtx --json | jq -r '.[].outputs | to_entries[].value' | cachix push r17x || true
+        continue-on-error: true

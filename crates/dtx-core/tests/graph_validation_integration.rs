@@ -1,7 +1,7 @@
 //! Integration test to verify graph validation API is accessible from external crates.
 
-use dtx_core::GraphValidator;
 use dtx_core::model::{DependencyCondition, Service};
+use dtx_core::GraphValidator;
 
 #[test]
 fn test_validate_enabled_dependencies_api() {

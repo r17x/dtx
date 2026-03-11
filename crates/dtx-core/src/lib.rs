@@ -51,9 +51,8 @@ pub use domain::{
 pub use error::{CoreError, NixError, PortConflictDetail, PortConflictError, Result};
 pub use events::{
     event_socket_path, notify_config_changed, notify_config_changed_sync, read_web_port,
-    start_event_listener,
-    DependencyCondition as LifecycleDependencyCondition, EventFilter, LifecycleEvent, PortGuard,
-    ResourceEventBus, ResourceEventSubscriber, SocketGuard,
+    start_event_listener, DependencyCondition as LifecycleDependencyCondition, EventFilter,
+    LifecycleEvent, PortGuard, ResourceEventBus, ResourceEventSubscriber, SocketGuard,
 };
 pub use graph::{CycleError, DependencyGraph, GraphNode, GraphValidator};
 pub use nix::{

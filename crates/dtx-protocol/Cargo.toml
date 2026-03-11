@@ -41,3 +41,6 @@ default = ["http", "websocket"]
 http = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite"]
 axum = ["dep:axum"]
+
+[lints]
+workspace = true

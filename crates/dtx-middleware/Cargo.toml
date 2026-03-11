@@ -28,3 +28,6 @@ ai = ["dep:reqwest"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

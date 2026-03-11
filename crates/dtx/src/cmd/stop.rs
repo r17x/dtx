@@ -23,7 +23,8 @@ pub async fn run(ctx: &Context, out: &Output, service: Option<String>) -> Result
     let project_id = ctx.store.project_root().to_string_lossy().to_string();
 
     if let Some(ref name) = service {
-        out.step(name).fail_untimed("single-service stop not yet supported");
+        out.step(name)
+            .fail_untimed("single-service stop not yet supported");
         Ok(())
     } else {
         stop_all_via_api(out, &project_id).await
@@ -64,7 +65,10 @@ async fn stop_all_via_api(out: &Output, project_id: &str) -> Result<()> {
         }
         Err(e) => {
             if e.is_connect() {
-                step.fail_untimed(&format!("can't reach web server on port {}", DEFAULT_WEB_PORT));
+                step.fail_untimed(&format!(
+                    "can't reach web server on port {}",
+                    DEFAULT_WEB_PORT
+                ));
                 Ok(())
             } else {
                 step.fail_untimed(&format!("{}", e));

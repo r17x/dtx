@@ -72,7 +72,10 @@ fn display_import_summary(out: &Output, config: &ImportedConfig) {
     }
 
     out.blank();
-    out.raw(&format!("Imported {} resource(s):\n", config.resources.len()));
+    out.raw(&format!(
+        "Imported {} resource(s):\n",
+        config.resources.len()
+    ));
     out.blank();
 
     for resource in &config.resources {
@@ -102,7 +105,10 @@ fn display_import_summary(out: &Output, config: &ImportedConfig) {
         }
 
         if !resource.depends_on.is_empty() {
-            out.raw(&format!("    depends_on: {}\n", resource.depends_on.join(", ")));
+            out.raw(&format!(
+                "    depends_on: {}\n",
+                resource.depends_on.join(", ")
+            ));
         }
 
         if let Some(ref hc) = resource.health_check {
@@ -118,7 +124,7 @@ fn display_import_summary(out: &Output, config: &ImportedConfig) {
 
     if !config.warnings.is_empty() {
         for warning in &config.warnings {
-            out.warning(&format!("{}", warning));
+            out.warning(&warning.to_string());
         }
         out.blank();
     }
@@ -255,7 +261,8 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     } = args;
 
     if !file.exists() {
-        out.step("import").fail_untimed(&format!("file not found: {}", file.display()));
+        out.step("import")
+            .fail_untimed(&format!("file not found: {}", file.display()));
         return Ok(());
     }
 
@@ -346,7 +353,10 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     // Save all at once
     ctx.store.save().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    group.done_with_summary(&format!("{} created, {} skipped", created_count, skipped_count));
+    group.done_with_summary(&format!(
+        "{} created, {} skipped",
+        created_count, skipped_count
+    ));
 
     // Notify web/TUI of config change (fire-and-forget, sync)
     dtx_core::notify_config_changed_sync();

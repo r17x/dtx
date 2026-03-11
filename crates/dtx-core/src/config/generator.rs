@@ -4,8 +4,8 @@ use crate::config::process_compose::{
     self as pc, ProcessComposeConfig, ProcessConfig, ShutdownConfig,
 };
 use crate::error::CoreError;
-use crate::Result;
 use crate::model::{Dependency, DependencyCondition, HealthCheck, HealthCheckType, Service};
+use crate::Result;
 use serde_yaml::{Mapping, Value};
 use std::collections::HashMap;
 
@@ -499,5 +499,4 @@ mod tests {
         let result = generator.generate(vec![service]);
         assert!(result.is_err());
     }
-
 }

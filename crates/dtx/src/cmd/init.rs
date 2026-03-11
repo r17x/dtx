@@ -32,7 +32,8 @@ pub async fn run(
 
     // Require a name unless --detect is used
     if name.is_none() && !detect {
-        out.step("init").fail_untimed("project name required (or use --detect)");
+        out.step("init")
+            .fail_untimed("project name required (or use --detect)");
         return Ok(());
     }
 
@@ -48,7 +49,8 @@ pub async fn run(
         match inferrer.infer(path_to_scan) {
             Ok(result) => {
                 if !result.is_empty() {
-                    out.step("detect").done_untimed(&format!("{}", result.project_type));
+                    out.step("detect")
+                        .done_untimed(&format!("{}", result.project_type));
 
                     if !result.detected_packages.is_empty() {
                         let mut grp = out.group("packages");

@@ -14,13 +14,10 @@ pub fn run(ctx: &Context, out: &Output, services: bool) -> Result<()> {
 }
 
 fn list_project(ctx: &Context, out: &Output) -> Result<()> {
-    let table = out
-        .table()
-        .headers(vec!["NAME", "PATH"])
-        .row(vec![
-            Cell::new(ctx.store.project_name()),
-            Cell::new(ctx.store.project_root().to_string_lossy()),
-        ]);
+    let table = out.table().headers(vec!["NAME", "PATH"]).row(vec![
+        Cell::new(ctx.store.project_name()),
+        Cell::new(ctx.store.project_root().to_string_lossy()),
+    ]);
 
     out.print_table(table);
 
@@ -31,7 +28,8 @@ fn list_services(ctx: &Context, out: &Output) -> Result<()> {
     let resources: Vec<_> = ctx.store.list_resources().collect();
 
     if resources.is_empty() {
-        out.step(ctx.store.project_name()).done_untimed("no services");
+        out.step(ctx.store.project_name())
+            .done_untimed("no services");
         return Ok(());
     }
 

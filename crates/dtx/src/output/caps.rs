@@ -27,9 +27,7 @@ impl Capabilities {
 
         let color = is_tty && !no_color && !is_dumb;
         let cursor = is_tty && !is_dumb;
-        let width = crossterm::terminal::size()
-            .map(|(w, _)| w)
-            .unwrap_or(80);
+        let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
 
         Self {
             color,

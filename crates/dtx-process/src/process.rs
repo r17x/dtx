@@ -208,8 +208,16 @@ impl ProcessResource {
         let mut pending_logs: Vec<LogEntry> = Vec::new();
 
         // Read stdout and stderr non-blocking
-        drain_reader(&mut self.stdout_reader, LogStreamKind::Stdout, &mut pending_logs);
-        drain_reader(&mut self.stderr_reader, LogStreamKind::Stderr, &mut pending_logs);
+        drain_reader(
+            &mut self.stdout_reader,
+            LogStreamKind::Stdout,
+            &mut pending_logs,
+        );
+        drain_reader(
+            &mut self.stderr_reader,
+            LogStreamKind::Stderr,
+            &mut pending_logs,
+        );
 
         // Now add all collected logs
         for entry in pending_logs {

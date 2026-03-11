@@ -70,8 +70,7 @@ impl ProjectRegistry {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let yaml = serde_yaml::to_string(&self.data)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let yaml = serde_yaml::to_string(&self.data).map_err(std::io::Error::other)?;
         std::fs::write(&self.path, yaml)
     }
 }

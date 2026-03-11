@@ -11,8 +11,7 @@ pub struct Context {
 impl Context {
     /// Creates a new context by discovering and loading the project config.
     pub fn new() -> Result<Self> {
-        let store = ConfigStore::discover_and_load()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let store = ConfigStore::discover_and_load().map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(Self { store })
     }
 }

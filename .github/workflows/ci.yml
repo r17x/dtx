@@ -1,0 +1,165 @@
+name: "CI"
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # weekly on Sunday at 00:00
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # =============================================================================
+  # Nix Flake Check
+  # =============================================================================
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/flake-checker-action@v12
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+        continue-on-error: true
+
+      - name: Nix Flake Show
+        run: nix flake show .
+
+      - name: Nix Flake Check
+        run: nix flake check --no-build
+
+      - name: Nix Build (dtx packages)
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: nix build .#dtx --print-build-logs
+
+      - uses: DeterminateSystems/update-flake-lock@v28
+        name: Update flake.lock
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          inputs: nixpkgs-unstable crane rust-overlay flake-parts serena llms-agents
+          branch: weekly-lock
+          git-author-name: 'github-actions[bot]'
+          git-author-email: '41898282+github-actions[bot]@users.noreply.github.com'
+          git-committer-name: 'github-actions[bot]'
+          git-committer-email: '41898282+github-actions[bot]@users.noreply.github.com'
+          commit-msg: 'chore(lockfile): update flake.lock'
+          pr-title: 'chore(lockfile): update flake.lock'
+          pr-labels: |
+            dependencies
+            automated
+            weekly
+
+  # =============================================================================
+  # Build & Test
+  # =============================================================================
+  build:
+    needs: [flake-check]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: macos-14
+            system: aarch64-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+        continue-on-error: true
+
+      - name: Build
+        run: nix build .#packages.${{ matrix.system }}.dtx --print-build-logs
+
+      - name: Verify Binary
+        run: ./result/bin/dtx --version
+
+  # =============================================================================
+  # Clippy
+  # =============================================================================
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+        continue-on-error: true
+
+      - name: Clippy Check
+        run: nix build .#checks.x86_64-linux.dtxClippy --print-build-logs
+
+  # =============================================================================
+  # Format Check
+  # =============================================================================
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+        continue-on-error: true
+
+      - name: Format Check
+        run: nix build .#checks.x86_64-linux.dtxFmt --print-build-logs
+
+  # =============================================================================
+  # Documentation
+  # =============================================================================
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-conf: "experimental-features = nix-command flakes pipe-operators"
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: cachix/cachix-action@v16
+        with:
+          name: r17x
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+        continue-on-error: true
+
+      - name: Build Documentation
+        run: nix build .#checks.x86_64-linux.dtxDoc --print-build-logs

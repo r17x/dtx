@@ -50,3 +50,6 @@ tracing-subscriber = { workspace = true }
 [features]
 default = []
 native-nix = ["nix-bindings-util", "nix-bindings-store", "nix-bindings-expr", "nix-bindings-fetchers", "nix-bindings-flake"]
+
+[lints]
+workspace = true

@@ -49,3 +49,6 @@ indexmap = { workspace = true }
 default = ["http-probe"]
 http-probe = ["dep:reqwest"]
 container = ["dep:bollard"]
+
+[lints]
+workspace = true

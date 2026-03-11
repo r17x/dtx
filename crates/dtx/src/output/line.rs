@@ -65,21 +65,32 @@ impl Indicator {
     }
 }
 
+/// Parameters for rendering a complete indicator line.
+pub struct RenderLineParams<'a> {
+    pub caps: &'a Capabilities,
+    pub indicator: Indicator,
+    pub label: &'a str,
+    pub result: &'a str,
+    pub timing: Option<&'a str>,
+    pub indent: usize,
+    pub full_width: bool,
+}
+
 /// Render a complete indicator line to a writer.
 ///
 /// full_width=true:  ` ● label ─────── result (timing)` (aligned, for pipeline/group)
 /// full_width=false: ` ● label ── result (timing)` (compact, for standalone steps)
 /// Non-TTY:          `dtx: label: result (timing)`
-pub fn render_line(
-    w: &mut dyn Write,
-    caps: &Capabilities,
-    indicator: Indicator,
-    label: &str,
-    result: &str,
-    timing: Option<&str>,
-    indent: usize,
-    full_width: bool,
-) {
+pub fn render_line(w: &mut dyn Write, params: &RenderLineParams<'_>) {
+    let RenderLineParams {
+        caps,
+        indicator,
+        label,
+        result,
+        timing,
+        indent,
+        full_width,
+    } = params;
     let mut full_result = result.to_string();
     if let Some(t) = timing {
         if caps.color {
@@ -90,13 +101,13 @@ pub fn render_line(
     }
 
     if caps.is_tty() {
-        if full_width {
-            render_tty(w, caps, indicator, label, &full_result, indent);
+        if *full_width {
+            render_tty(w, caps, *indicator, label, &full_result, *indent);
         } else {
-            render_tty_compact(w, caps, indicator, label, &full_result, indent);
+            render_tty_compact(w, caps, *indicator, label, &full_result, *indent);
         }
     } else {
-        render_pipe(w, label, &full_result, indent);
+        render_pipe(w, label, &full_result, *indent);
     }
 }
 
@@ -129,7 +140,11 @@ fn render_tty_full(
         let reset = "\x1b[0m";
 
         if caps.width < 40 || available < 3 {
-            let _ = write!(w, "{} {}{}{} {} {}{}", indent_str, color, glyph, reset, label, result, nl);
+            let _ = write!(
+                w,
+                "{} {}{}{} {} {}{}",
+                indent_str, color, glyph, reset, label, result, nl
+            );
         } else {
             let fill = fill_ch.repeat(fill_n);
             let pad = " ".repeat(available.saturating_sub(fill_n));
@@ -139,14 +154,16 @@ fn render_tty_full(
                 indent_str, color, glyph, reset, label, fill, pad, result, nl
             );
         }
+    } else if caps.width < 40 || available < 3 {
+        let _ = write!(w, "{} {} {} {}{}", indent_str, glyph, label, result, nl);
     } else {
-        if caps.width < 40 || available < 3 {
-            let _ = write!(w, "{} {} {} {}{}", indent_str, glyph, label, result, nl);
-        } else {
-            let fill = fill_ch.repeat(fill_n);
-            let pad = " ".repeat(available.saturating_sub(fill_n));
-            let _ = write!(w, "{} {} {} {}{} {}{}", indent_str, glyph, label, fill, pad, result, nl);
-        }
+        let fill = fill_ch.repeat(fill_n);
+        let pad = " ".repeat(available.saturating_sub(fill_n));
+        let _ = write!(
+            w,
+            "{} {} {} {}{} {}{}",
+            indent_str, glyph, label, fill, pad, result, nl
+        );
     }
 }
 
@@ -177,7 +194,11 @@ fn render_tty_compact(
     if caps.color {
         let color = indicator.color_code();
         let reset = "\x1b[0m";
-        let _ = writeln!(w, "{} {}{}{} {} \x1b[2m──\x1b[0m {}", indent_str, color, glyph, reset, label, result);
+        let _ = writeln!(
+            w,
+            "{} {}{}{} {} \x1b[2m──\x1b[0m {}",
+            indent_str, color, glyph, reset, label, result
+        );
     } else {
         let _ = writeln!(w, "{} {} {} ── {}", indent_str, glyph, label, result);
     }
@@ -225,16 +246,22 @@ pub fn render_ephemeral(
                 indent_str, color, glyph, reset, label, fill, pad, status
             );
         } else {
-            let _ = write!(w, "\r\x1b[K{} {}{}{} {} {}", indent_str, color, glyph, reset, label, status);
+            let _ = write!(
+                w,
+                "\r\x1b[K{} {}{}{} {} {}",
+                indent_str, color, glyph, reset, label, status
+            );
         }
+    } else if available >= 3 {
+        let fill = fill_ch.repeat(fill_n);
+        let pad = " ".repeat(available.saturating_sub(fill_n));
+        let _ = write!(
+            w,
+            "\r\x1b[K{} {} {} {}{} {}",
+            indent_str, glyph, label, fill, pad, status
+        );
     } else {
-        if available >= 3 {
-            let fill = fill_ch.repeat(fill_n);
-            let pad = " ".repeat(available.saturating_sub(fill_n));
-            let _ = write!(w, "\r\x1b[K{} {} {} {}{} {}", indent_str, glyph, label, fill, pad, status);
-        } else {
-            let _ = write!(w, "\r\x1b[K{} {} {} {}", indent_str, glyph, label, status);
-        }
+        let _ = write!(w, "\r\x1b[K{} {} {} {}", indent_str, glyph, label, status);
     }
     let _ = w.flush();
 }
@@ -383,11 +410,25 @@ mod tests {
             width: 60,
         };
         let mut buf1 = Vec::new();
-        render_tty(&mut buf1, &caps, Indicator::Spinning(0), "nix", "loading", 0);
+        render_tty(
+            &mut buf1,
+            &caps,
+            Indicator::Spinning(0),
+            "nix",
+            "loading",
+            0,
+        );
         let out1 = String::from_utf8(buf1).unwrap();
 
         let mut buf2 = Vec::new();
-        render_tty(&mut buf2, &caps, Indicator::Spinning(10), "nix", "loading", 0);
+        render_tty(
+            &mut buf2,
+            &caps,
+            Indicator::Spinning(10),
+            "nix",
+            "loading",
+            0,
+        );
         let out2 = String::from_utf8(buf2).unwrap();
 
         // More dots at frame 10 than frame 0

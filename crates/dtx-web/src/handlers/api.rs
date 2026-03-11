@@ -63,15 +63,17 @@ pub async fn init_cwd(
         axum::http::HeaderValue::from_static("/"),
     )];
 
-    Ok((StatusCode::OK, headers, Json(InitCwdResponse { name, path })))
+    Ok((
+        StatusCode::OK,
+        headers,
+        Json(InitCwdResponse { name, path }),
+    ))
 }
 
 // === Services ===
 
 /// List all services.
-pub async fn list_services(
-    State(state): State<AppState>,
-) -> AppResult<Json<Vec<ModelService>>> {
+pub async fn list_services(State(state): State<AppState>) -> AppResult<Json<Vec<ModelService>>> {
     let store = state.store.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     Ok(Json(services))
@@ -109,19 +111,24 @@ pub async fn create_service(
 
     let name = req.name.to_string();
 
-    let mut rc = ResourceConfig::default();
-    rc.command = Some(req.command.to_string());
-    rc.port = req.port;
-    rc.working_dir = req.working_dir.map(PathBuf::from);
-    if let Some(ref pkg) = req.package {
-        rc.nix = Some(dtx_core::config::schema::NixConfig {
-            packages: vec![pkg.clone()],
-            ..Default::default()
-        });
-    }
+    let rc = ResourceConfig {
+        command: Some(req.command.to_string()),
+        port: req.port,
+        working_dir: req.working_dir.map(PathBuf::from),
+        nix: req
+            .package
+            .as_ref()
+            .map(|pkg| dtx_core::config::schema::NixConfig {
+                packages: vec![pkg.clone()],
+                ..Default::default()
+            }),
+        ..Default::default()
+    };
 
     let mut store = state.store.write().await;
-    store.add_resource(&name, rc.clone()).map_err(AppError::from)?;
+    store
+        .add_resource(&name, rc.clone())
+        .map_err(AppError::from)?;
     store.save().map_err(AppError::from)?;
 
     // Sync flake.nix if service has a package
@@ -188,10 +195,7 @@ pub async fn update_service(
         .get_resource_mut(&name)
         .ok_or_else(|| AppError::not_found(format!("Service '{}' not found", name)))?;
 
-    let old_package = rc
-        .nix
-        .as_ref()
-        .and_then(|n| n.packages.first().cloned());
+    let old_package = rc.nix.as_ref().and_then(|n| n.packages.first().cloned());
 
     if let Some(ref cmd) = req.command {
         rc.command = Some(cmd.to_string());
@@ -247,13 +251,9 @@ pub async fn update_service(
         if let Some(ref pkg) = old_package {
             let remaining_packages: HashSet<String> = store
                 .list_resources()
-                .filter_map(|(_, rc)| {
-                    rc.nix.as_ref().and_then(|n| n.packages.first().cloned())
-                })
+                .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
                 .collect();
-            if let Err(e) =
-                dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages)
-            {
+            if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
                 tracing::warn!("Failed to sync flake.nix (remove): {}", e);
             }
         }
@@ -282,13 +282,9 @@ pub async fn delete_service(
         let project_root = store.project_root().to_path_buf();
         let remaining_packages: HashSet<String> = store
             .list_resources()
-            .filter_map(|(_, rc)| {
-                rc.nix.as_ref().and_then(|n| n.packages.first().cloned())
-            })
+            .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
             .collect();
-        if let Err(e) =
-            dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages)
-        {
+        if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
             tracing::warn!("Failed to sync flake.nix: {}", e);
         }
     }
@@ -597,9 +593,7 @@ async fn do_start_services(state: &AppState) -> AppResult<Json<ProcessResponse>>
 }
 
 /// Start services.
-pub async fn start_services(
-    State(state): State<AppState>,
-) -> AppResult<Json<ProcessResponse>> {
+pub async fn start_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
     // Check if already running
     {
         let orch = state.orchestrator.read().await;
@@ -614,9 +608,7 @@ pub async fn start_services(
 }
 
 /// Restart services (stop, regenerate config, start).
-pub async fn restart_services(
-    State(state): State<AppState>,
-) -> AppResult<Json<ProcessResponse>> {
+pub async fn restart_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
     // Stop existing orchestrator if running
     {
         let mut orch = state.orchestrator.write().await;
@@ -635,9 +627,7 @@ pub async fn restart_services(
 }
 
 /// Stop services.
-pub async fn stop_services(
-    State(state): State<AppState>,
-) -> AppResult<Json<ProcessResponse>> {
+pub async fn stop_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
     let mut orch = state.orchestrator.write().await;
 
     if let Some(ref mut orchestrator) = *orch {
@@ -655,9 +645,7 @@ pub async fn stop_services(
 }
 
 /// Get status of services.
-pub async fn get_status(
-    State(state): State<AppState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn get_status(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     let orch = state.orchestrator.read().await;
 
     let status = if let Some(ref orchestrator) = *orch {
@@ -772,9 +760,7 @@ pub struct NixInitResponse {
 }
 
 /// Get Nix environment status.
-pub async fn get_nix_status(
-    State(state): State<AppState>,
-) -> AppResult<Json<NixStatusResponse>> {
+pub async fn get_nix_status(State(state): State<AppState>) -> AppResult<Json<NixStatusResponse>> {
     let store = state.store.read().await;
     let project_root = store.project_root().to_path_buf();
 
@@ -783,9 +769,7 @@ pub async fn get_nix_status(
 
     let packages: Vec<String> = store
         .list_enabled_resources()
-        .filter_map(|(_, rc)| {
-            rc.nix.as_ref().and_then(|n| n.packages.first().cloned())
-        })
+        .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
         .collect();
 
     Ok(Json(NixStatusResponse {
@@ -796,9 +780,7 @@ pub async fn get_nix_status(
 }
 
 /// Initialize Nix environment.
-pub async fn nix_init(
-    State(state): State<AppState>,
-) -> AppResult<Json<NixInitResponse>> {
+pub async fn nix_init(State(state): State<AppState>) -> AppResult<Json<NixInitResponse>> {
     let store = state.store.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_root = store.project_root().to_path_buf();
@@ -819,9 +801,7 @@ pub async fn nix_init(
 }
 
 /// Regenerate .envrc only.
-pub async fn nix_envrc(
-    State(state): State<AppState>,
-) -> AppResult<Json<NixInitResponse>> {
+pub async fn nix_envrc(State(state): State<AppState>) -> AppResult<Json<NixInitResponse>> {
     let store = state.store.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_root = store.project_root().to_path_buf();
@@ -838,9 +818,7 @@ pub async fn nix_envrc(
 }
 
 /// Download flake.nix.
-pub async fn download_flake(
-    State(state): State<AppState>,
-) -> AppResult<String> {
+pub async fn download_flake(State(state): State<AppState>) -> AppResult<String> {
     let store = state.store.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_name = store.project_name().to_string();

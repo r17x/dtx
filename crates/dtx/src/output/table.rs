@@ -113,7 +113,10 @@ impl TableBuilder {
             }
 
             // Separator
-            let total_width = padded_widths.iter().sum::<usize>().min(self.caps.width as usize);
+            let total_width = padded_widths
+                .iter()
+                .sum::<usize>()
+                .min(self.caps.width as usize);
             if self.caps.color {
                 let _ = writeln!(w, "\x1b[2m{}\x1b[0m", "─".repeat(total_width));
             } else {

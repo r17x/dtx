@@ -50,7 +50,8 @@ pub async fn run(
 
         // Value without key -> error
         (None, Some(_), _, _) => {
-            out.step("config").fail_untimed("key required when setting a value");
+            out.step("config")
+                .fail_untimed("key required when setting a value");
             Ok(())
         }
     }

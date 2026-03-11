@@ -42,3 +42,6 @@ default = ["qemu", "firecracker", "nixos"]
 qemu = []
 firecracker = []
 nixos = []
+
+[lints]
+workspace = true

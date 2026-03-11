@@ -23,6 +23,109 @@ pub struct Cli {
     command: Commands,
 }
 
+/// Arguments for the `add` subcommand.
+#[derive(clap::Args)]
+pub struct AddArgs {
+    /// Service name
+    pub name: String,
+
+    /// Resource kind: process (default), container, vm, agent
+    #[arg(short, long, value_parser = ["process", "container", "vm", "agent"])]
+    pub kind: Option<String>,
+
+    /// Command to run the service (auto-detected for known packages)
+    #[arg(short, long)]
+    pub command: Option<String>,
+
+    /// Package name (auto-inferred from name/command if omitted)
+    #[arg(short = 'P', long)]
+    pub package: Option<String>,
+
+    /// Port number
+    #[arg(short, long)]
+    pub port: Option<u16>,
+
+    /// Working directory
+    #[arg(short, long)]
+    pub working_dir: Option<String>,
+
+    /// Environment variables (KEY=VALUE format)
+    #[arg(short, long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Services this depends on (format: "service" or "service:condition")
+    /// Conditions: started (default), healthy, completed
+    #[arg(long, value_delimiter = ',')]
+    pub depends_on: Vec<String>,
+
+    /// Disable the service initially
+    #[arg(long)]
+    pub disabled: bool,
+
+    /// Restart policy: always, on-failure (default), no
+    #[arg(long, value_parser = ["always", "on-failure", "no"])]
+    pub restart: Option<String>,
+
+    /// Health check (format: "exec:command" or "http:host:port/path")
+    #[arg(long)]
+    pub health_check: Option<String>,
+
+    /// Liveness probe (format: "exec:command" or "http:host:port/path")
+    #[arg(long)]
+    pub liveness: Option<String>,
+
+    /// Shutdown config (format: "command:...", "SIGTERM", or "SIGINT")
+    #[arg(long)]
+    pub shutdown: Option<String>,
+
+    /// Shutdown timeout (e.g., "30s")
+    #[arg(long)]
+    pub shutdown_timeout: Option<String>,
+
+    // -- Container-specific --
+    /// Container image [container]
+    #[arg(long)]
+    pub image: Option<String>,
+
+    /// Volume mounts [container] (format: "host:container")
+    #[arg(long)]
+    pub volume: Vec<String>,
+
+    // -- VM-specific --
+    /// VM backend: qemu, firecracker [vm]
+    #[arg(long, value_parser = ["qemu", "firecracker"])]
+    pub vm_backend: Option<String>,
+
+    /// VM memory (e.g., "2G") [vm]
+    #[arg(long)]
+    pub memory: Option<String>,
+
+    /// VM CPU count [vm]
+    #[arg(long)]
+    pub cpus: Option<u32>,
+
+    /// VM disk image path [vm]
+    #[arg(long)]
+    pub disk: Option<String>,
+
+    /// NixOS configuration path [vm]
+    #[arg(long)]
+    pub nixos: Option<String>,
+
+    // -- Agent-specific --
+    /// Agent runtime: claude, openai, ollama [agent]
+    #[arg(long)]
+    pub runtime: Option<String>,
+
+    /// Agent model (e.g., "claude-sonnet-4-20250514") [agent]
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Agent tools [agent]
+    #[arg(long)]
+    pub tool: Vec<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new project
@@ -48,106 +151,7 @@ pub enum Commands {
     },
 
     /// Add a service to the project
-    Add {
-        /// Service name
-        name: String,
-
-        /// Resource kind: process (default), container, vm, agent
-        #[arg(short, long, value_parser = ["process", "container", "vm", "agent"])]
-        kind: Option<String>,
-
-        /// Command to run the service (auto-detected for known packages)
-        #[arg(short, long)]
-        command: Option<String>,
-
-        /// Package name (auto-inferred from name/command if omitted)
-        #[arg(short = 'P', long)]
-        package: Option<String>,
-
-        /// Port number
-        #[arg(short, long)]
-        port: Option<u16>,
-
-        /// Working directory
-        #[arg(short, long)]
-        working_dir: Option<String>,
-
-        /// Environment variables (KEY=VALUE format)
-        #[arg(short, long, value_name = "KEY=VALUE")]
-        env: Vec<String>,
-
-        /// Services this depends on (format: "service" or "service:condition")
-        /// Conditions: started (default), healthy, completed
-        #[arg(long, value_delimiter = ',')]
-        depends_on: Vec<String>,
-
-        /// Disable the service initially
-        #[arg(long)]
-        disabled: bool,
-
-        /// Restart policy: always, on-failure (default), no
-        #[arg(long, value_parser = ["always", "on-failure", "no"])]
-        restart: Option<String>,
-
-        /// Health check (format: "exec:command" or "http:host:port/path")
-        #[arg(long)]
-        health_check: Option<String>,
-
-        /// Liveness probe (format: "exec:command" or "http:host:port/path")
-        #[arg(long)]
-        liveness: Option<String>,
-
-        /// Shutdown config (format: "command:...", "SIGTERM", or "SIGINT")
-        #[arg(long)]
-        shutdown: Option<String>,
-
-        /// Shutdown timeout (e.g., "30s")
-        #[arg(long)]
-        shutdown_timeout: Option<String>,
-
-        // -- Container-specific --
-        /// Container image [container]
-        #[arg(long)]
-        image: Option<String>,
-
-        /// Volume mounts [container] (format: "host:container")
-        #[arg(long)]
-        volume: Vec<String>,
-
-        // -- VM-specific --
-        /// VM backend: qemu, firecracker [vm]
-        #[arg(long, value_parser = ["qemu", "firecracker"])]
-        vm_backend: Option<String>,
-
-        /// VM memory (e.g., "2G") [vm]
-        #[arg(long)]
-        memory: Option<String>,
-
-        /// VM CPU count [vm]
-        #[arg(long)]
-        cpus: Option<u32>,
-
-        /// VM disk image path [vm]
-        #[arg(long)]
-        disk: Option<String>,
-
-        /// NixOS configuration path [vm]
-        #[arg(long)]
-        nixos: Option<String>,
-
-        // -- Agent-specific --
-        /// Agent runtime: claude, openai, ollama [agent]
-        #[arg(long)]
-        runtime: Option<String>,
-
-        /// Agent model (e.g., "claude-sonnet-4-20250514") [agent]
-        #[arg(long)]
-        model: Option<String>,
-
-        /// Agent tools [agent]
-        #[arg(long)]
-        tool: Vec<String>,
-    },
+    Add(Box<AddArgs>),
 
     /// Edit an existing service
     Edit {
@@ -485,59 +489,34 @@ async fn run(out: &output::Output) -> Result<()> {
             },
         ),
 
-        Commands::Add {
-            name,
-            kind,
-            command,
-            package,
-            port,
-            working_dir,
-            env,
-            depends_on,
-            disabled,
-            restart,
-            health_check,
-            liveness,
-            shutdown,
-            shutdown_timeout,
-            image,
-            volume,
-            vm_backend,
-            memory,
-            cpus,
-            disk,
-            nixos,
-            runtime,
-            model,
-            tool,
-        } => cmd::add::run(
+        Commands::Add(args) => cmd::add::run(
             &mut ctx,
             out,
             cmd::add::AddArgs {
-                name,
-                kind,
-                command,
-                package,
-                port,
-                working_dir,
-                env_vars: env,
-                depends_on,
-                disabled,
-                restart,
-                health_check,
-                liveness,
-                shutdown,
-                shutdown_timeout,
-                image,
-                volumes: volume,
-                vm_backend,
-                memory,
-                cpus,
-                disk,
-                nixos,
-                runtime,
-                model,
-                tools: tool,
+                name: args.name,
+                kind: args.kind,
+                command: args.command,
+                package: args.package,
+                port: args.port,
+                working_dir: args.working_dir,
+                env_vars: args.env,
+                depends_on: args.depends_on,
+                disabled: args.disabled,
+                restart: args.restart,
+                health_check: args.health_check,
+                liveness: args.liveness,
+                shutdown: args.shutdown,
+                shutdown_timeout: args.shutdown_timeout,
+                image: args.image,
+                volumes: args.volume,
+                vm_backend: args.vm_backend,
+                memory: args.memory,
+                cpus: args.cpus,
+                disk: args.disk,
+                nixos: args.nixos,
+                runtime: args.runtime,
+                model: args.model,
+                tools: args.tool,
             },
         ),
 
@@ -600,7 +579,15 @@ async fn run(out: &output::Output) -> Result<()> {
             namespace,
             default_image,
             services,
-        } => cmd::export::run(&ctx, out, output, &format, namespace, default_image, services),
+        } => cmd::export::run(
+            &ctx,
+            out,
+            output,
+            &format,
+            namespace,
+            default_image,
+            services,
+        ),
 
         Commands::Nix { command } => match command {
             NixCommands::Init => cmd::nix::init(&ctx, out).await,

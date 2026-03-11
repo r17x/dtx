@@ -14,8 +14,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dtx_core::events::{EventFilter, LifecycleEvent, ResourceEventBus, ResourceEventSubscriber};
-use dtx_core::resource::{Context, LogStreamKind, Resource, ResourceId, ResourceState};
 use dtx_core::model::Service;
+use dtx_core::resource::{Context, LogStreamKind, Resource, ResourceId, ResourceState};
 use dtx_core::store::ConfigStore;
 use dtx_process::{ProcessResourceConfig, ResourceOrchestrator};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -269,7 +269,7 @@ impl App {
             KeyCode::Char('a') if self.config_changed => {
                 self.config_changed = false;
                 self.status_message = Some("Reloading config...".to_string());
-                return Some(TuiAction::Reload);
+                Some(TuiAction::Reload)
             }
             KeyCode::Char('c') => {
                 self.logs.clear();
@@ -298,7 +298,8 @@ impl App {
     pub fn add_service(&mut self, name: String) {
         if !self.service_names.contains(&name) {
             self.service_names.push(name.clone());
-            self.service_states.insert(name.clone(), DisplayState::Pending);
+            self.service_states
+                .insert(name.clone(), DisplayState::Pending);
             self.restart_counts.insert(name, 0);
         }
     }
@@ -359,7 +360,8 @@ pub async fn run_tui(
     }
 
     let enabled_count = enabled_services.len();
-    out.step("prepare").done_untimed(&format!("{} service(s)", enabled_count));
+    out.step("prepare")
+        .done_untimed(&format!("{} service(s)", enabled_count));
 
     // Create shared ResourceEventBus
     let event_bus = Arc::new(ResourceEventBus::new());
@@ -497,17 +499,24 @@ pub async fn run_tui(
                                         let mut removed = Vec::new();
 
                                         // Find new services
-                                        let current_names: std::collections::HashSet<_> =
-                                            app.service_infos().iter().map(|s| s.name.clone()).collect();
-                                        let config_names: std::collections::HashSet<_> =
-                                            store.list_enabled_resources().map(|(n, _)| n.to_string()).collect();
+                                        let current_names: std::collections::HashSet<_> = app
+                                            .service_infos()
+                                            .iter()
+                                            .map(|s| s.name.clone())
+                                            .collect();
+                                        let config_names: std::collections::HashSet<_> = store
+                                            .list_enabled_resources()
+                                            .map(|(n, _)| n.to_string())
+                                            .collect();
 
                                         for (name, rc) in store.list_enabled_resources() {
                                             if !current_names.contains(name) {
                                                 let svc = Service::from_resource_config(name, rc);
-                                                let mut config = service_to_config(&svc, &project_dir);
+                                                let mut config =
+                                                    service_to_config(&svc, &project_dir);
                                                 if let Some(ref env) = nix_env {
-                                                    let user_env = std::mem::take(&mut config.environment);
+                                                    let user_env =
+                                                        std::mem::take(&mut config.environment);
                                                     config.environment = env.clone();
                                                     config.environment.extend(user_env);
                                                 }
@@ -532,7 +541,10 @@ pub async fn run_tui(
                                                 let mut resource = resource.write().await;
                                                 let ctx = Context::new();
                                                 if let Err(e) = resource.start(&ctx).await {
-                                                    app.set_status(format!("Failed to start {}: {}", name, e));
+                                                    app.set_status(format!(
+                                                        "Failed to start {}: {}",
+                                                        name, e
+                                                    ));
                                                 }
                                             }
                                         }
@@ -542,8 +554,13 @@ pub async fn run_tui(
                                             msg.push_str(&format!("Added: {}", added.join(", ")));
                                         }
                                         if !removed.is_empty() {
-                                            if !msg.is_empty() { msg.push_str(" | "); }
-                                            msg.push_str(&format!("Removed: {}", removed.join(", ")));
+                                            if !msg.is_empty() {
+                                                msg.push_str(" | ");
+                                            }
+                                            msg.push_str(&format!(
+                                                "Removed: {}",
+                                                removed.join(", ")
+                                            ));
                                         }
                                         if msg.is_empty() {
                                             msg = "Config reloaded (no changes)".to_string();

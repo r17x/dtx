@@ -33,6 +33,12 @@ struct OutputInner {
     caps: Capabilities,
 }
 
+impl Default for Output {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Output {
     /// Create a new Output that writes to stdout/stderr with auto-detected capabilities.
     pub fn new() -> Self {
@@ -246,9 +252,28 @@ impl Output {
     }
 
     /// Write directly to the underlying writer.
-    fn write_line(&self, indicator: Indicator, label: &str, result: &str, timing: Option<&str>, indent: usize, full_width: bool) {
+    fn write_line(
+        &self,
+        indicator: Indicator,
+        label: &str,
+        result: &str,
+        timing: Option<&str>,
+        indent: usize,
+        full_width: bool,
+    ) {
         let mut w = self.inner.writer.lock().unwrap();
-        line::render_line(&mut *w, &self.inner.caps, indicator, label, result, timing, indent, full_width);
+        line::render_line(
+            &mut *w,
+            &line::RenderLineParams {
+                caps: &self.inner.caps,
+                indicator,
+                label,
+                result,
+                timing,
+                indent,
+                full_width,
+            },
+        );
     }
 
     fn write_ephemeral(&self, indicator: Indicator, label: &str, status: &str, indent: usize) {
@@ -294,12 +319,14 @@ impl Drop for AnimationHandle {
 impl Step {
     /// Show pending state (ephemeral on TTY).
     pub fn pending(&mut self, status: &str) {
-        self.output.write_ephemeral(Indicator::Pending, &self.label, status, self.indent);
+        self.output
+            .write_ephemeral(Indicator::Pending, &self.label, status, self.indent);
     }
 
     /// Show in-progress state (overwrites ephemeral on TTY).
     pub fn progress(&mut self, status: &str) {
-        self.output.write_ephemeral(Indicator::InProgress, &self.label, status, self.indent);
+        self.output
+            .write_ephemeral(Indicator::InProgress, &self.label, status, self.indent);
     }
 
     /// Start a live progress animation with elapsed timer.
@@ -366,14 +393,28 @@ impl Step {
         self.output.clear_ephemeral();
         let elapsed = self.start.elapsed();
         let timing = format_duration(elapsed);
-        self.output.write_line(Indicator::Done, &self.label, result, Some(&timing), self.indent, self.full_width);
+        self.output.write_line(
+            Indicator::Done,
+            &self.label,
+            result,
+            Some(&timing),
+            self.indent,
+            self.full_width,
+        );
     }
 
     /// Mark as done without timing. Consumes self (stops animation).
     pub fn done_untimed(self, result: &str) {
         drop(self.animation);
         self.output.clear_ephemeral();
-        self.output.write_line(Indicator::Done, &self.label, result, None, self.indent, self.full_width);
+        self.output.write_line(
+            Indicator::Done,
+            &self.label,
+            result,
+            None,
+            self.indent,
+            self.full_width,
+        );
     }
 
     /// Mark as failed. Consumes self (stops animation).
@@ -382,14 +423,28 @@ impl Step {
         self.output.clear_ephemeral();
         let elapsed = self.start.elapsed();
         let timing = format_duration(elapsed);
-        self.output.write_line(Indicator::Failed, &self.label, result, Some(&timing), self.indent, self.full_width);
+        self.output.write_line(
+            Indicator::Failed,
+            &self.label,
+            result,
+            Some(&timing),
+            self.indent,
+            self.full_width,
+        );
     }
 
     /// Mark as failed without timing. Consumes self (stops animation).
     pub fn fail_untimed(self, result: &str) {
         drop(self.animation);
         self.output.clear_ephemeral();
-        self.output.write_line(Indicator::Failed, &self.label, result, None, self.indent, self.full_width);
+        self.output.write_line(
+            Indicator::Failed,
+            &self.label,
+            result,
+            None,
+            self.indent,
+            self.full_width,
+        );
     }
 }
 
@@ -456,11 +511,17 @@ impl Group {
             (Indicator::Done, format!("{} done", total))
         };
 
-        self.output.write_line(indicator, &self.label, &summary, Some(&timing), 0, true);
+        self.output
+            .write_line(indicator, &self.label, &summary, Some(&timing), 0, true);
 
         for child in &self.children {
-            let ind = if child.failed { Indicator::Failed } else { Indicator::Done };
-            self.output.write_line(ind, &child.label, &child.result, None, 1, true);
+            let ind = if child.failed {
+                Indicator::Failed
+            } else {
+                Indicator::Done
+            };
+            self.output
+                .write_line(ind, &child.label, &child.result, None, 1, true);
         }
     }
 
@@ -473,12 +534,22 @@ impl Group {
         let elapsed = self.start.elapsed();
         let timing = format_duration(elapsed);
 
-        let indicator = if has_failure { Indicator::Partial } else { Indicator::Done };
-        self.output.write_line(indicator, &self.label, summary, Some(&timing), 0, true);
+        let indicator = if has_failure {
+            Indicator::Partial
+        } else {
+            Indicator::Done
+        };
+        self.output
+            .write_line(indicator, &self.label, summary, Some(&timing), 0, true);
 
         for child in &self.children {
-            let ind = if child.failed { Indicator::Failed } else { Indicator::Done };
-            self.output.write_line(ind, &child.label, &child.result, None, 1, true);
+            let ind = if child.failed {
+                Indicator::Failed
+            } else {
+                Indicator::Done
+            };
+            self.output
+                .write_line(ind, &child.label, &child.result, None, 1, true);
         }
     }
 }
@@ -489,10 +560,19 @@ impl Group {
 #[derive(Clone)]
 enum PipelineStepState {
     Pending,
-    InProgress { status: String, frame: u8 },
+    InProgress {
+        status: String,
+        frame: u8,
+    },
     /// `display` is the pre-formatted result+timing string, computed once at transition.
-    Done { timing: Option<String>, display: String },
-    Failed { timing: Option<String>, display: String },
+    Done {
+        timing: Option<String>,
+        display: String,
+    },
+    Failed {
+        timing: Option<String>,
+        display: String,
+    },
 }
 
 /// A pipeline shows all steps upfront as pending placeholders,
@@ -548,7 +628,14 @@ fn redraw_pipeline(
             PipelineStepState::InProgress { status, frame } => {
                 let elapsed = format_duration(starts[i].elapsed());
                 let result = format!("{} ({})", status, elapsed);
-                line::render_tty_no_newline(w, caps, Indicator::Spinning(*frame), label, &result, 0);
+                line::render_tty_no_newline(
+                    w,
+                    caps,
+                    Indicator::Spinning(*frame),
+                    label,
+                    &result,
+                    0,
+                );
             }
             PipelineStepState::Done { display, .. } => {
                 line::render_tty_no_newline(w, caps, Indicator::Done, label, display, 0);
@@ -558,7 +645,7 @@ fn redraw_pipeline(
             }
         }
         if i < states.len() - 1 {
-            let _ = write!(w, "\n");
+            let _ = writeln!(w);
         }
     }
     let _ = w.flush();
@@ -567,7 +654,13 @@ fn redraw_pipeline(
 impl Pipeline {
     /// Redraw all pipeline lines from current cursor position.
     fn redraw(&self, w: &mut dyn io::Write) {
-        redraw_pipeline(w, &self.output.inner.caps, &self.labels, &self.states, &self.starts);
+        redraw_pipeline(
+            w,
+            &self.output.inner.caps,
+            &self.labels,
+            &self.states,
+            &self.starts,
+        );
     }
 
     /// Move cursor to the top of the pipeline block and redraw everything.
@@ -649,10 +742,13 @@ impl Pipeline {
             }
         });
 
-        self.animation = Some((index, AnimationHandle {
-            stop,
-            thread: Some(thread),
-        }));
+        self.animation = Some((
+            index,
+            AnimationHandle {
+                stop,
+                thread: Some(thread),
+            },
+        ));
     }
 
     /// Build a Done/Failed state with pre-computed display string.
@@ -678,7 +774,14 @@ impl Pipeline {
         if self.output.caps().cursor {
             self.update();
         } else {
-            self.output.write_line(Indicator::Done, &self.labels[index], result, self.timing_str(index).as_deref(), 0, true);
+            self.output.write_line(
+                Indicator::Done,
+                &self.labels[index],
+                result,
+                self.timing_str(index).as_deref(),
+                0,
+                true,
+            );
         }
     }
 
@@ -693,7 +796,8 @@ impl Pipeline {
         if self.output.caps().cursor {
             self.update();
         } else {
-            self.output.write_line(Indicator::Done, &self.labels[index], result, None, 0, true);
+            self.output
+                .write_line(Indicator::Done, &self.labels[index], result, None, 0, true);
         }
     }
 
@@ -709,7 +813,14 @@ impl Pipeline {
         if self.output.caps().cursor {
             self.update();
         } else {
-            self.output.write_line(Indicator::Failed, &self.labels[index], result, self.timing_str(index).as_deref(), 0, true);
+            self.output.write_line(
+                Indicator::Failed,
+                &self.labels[index],
+                result,
+                self.timing_str(index).as_deref(),
+                0,
+                true,
+            );
         }
     }
 
@@ -724,14 +835,23 @@ impl Pipeline {
         if self.output.caps().cursor {
             self.update();
         } else {
-            self.output.write_line(Indicator::Failed, &self.labels[index], result, None, 0, true);
+            self.output.write_line(
+                Indicator::Failed,
+                &self.labels[index],
+                result,
+                None,
+                0,
+                true,
+            );
         }
     }
 
     /// Helper: get timing string from state (for non-TTY fallback).
     fn timing_str(&self, index: usize) -> Option<String> {
         match &self.states[index] {
-            PipelineStepState::Done { timing, .. } | PipelineStepState::Failed { timing, .. } => timing.clone(),
+            PipelineStepState::Done { timing, .. } | PipelineStepState::Failed { timing, .. } => {
+                timing.clone()
+            }
             _ => None,
         }
     }
@@ -879,8 +999,14 @@ mod tests {
 
     #[test]
     fn test_format_duration() {
-        assert_eq!(format_duration(std::time::Duration::from_millis(100)), "0.1s");
-        assert_eq!(format_duration(std::time::Duration::from_millis(1234)), "1.2s");
+        assert_eq!(
+            format_duration(std::time::Duration::from_millis(100)),
+            "0.1s"
+        );
+        assert_eq!(
+            format_duration(std::time::Duration::from_millis(1234)),
+            "1.2s"
+        );
         assert_eq!(format_duration(std::time::Duration::from_secs(65)), "1m 5s");
     }
 }

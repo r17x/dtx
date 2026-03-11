@@ -8,8 +8,7 @@ use tracing::debug;
 /// Run the status command.
 pub async fn run(ctx: &Context, out: &Output, service: Option<String>) -> Result<()> {
     // Show project info
-    out.step("project")
-        .done_untimed(ctx.store.project_name());
+    out.step("project").done_untimed(ctx.store.project_name());
 
     // Check if web server is running (try live status, fall back to config)
     let dtx_dir = ctx.store.project_root().join(".dtx");
@@ -26,7 +25,12 @@ pub async fn run(ctx: &Context, out: &Output, service: Option<String>) -> Result
 }
 
 /// Shows live service status from the API.
-async fn show_live_status(out: &Output, project_id: &str, port: u16, filter: Option<&str>) -> Result<()> {
+async fn show_live_status(
+    out: &Output,
+    project_id: &str,
+    port: u16,
+    filter: Option<&str>,
+) -> Result<()> {
     let url = format!(
         "http://127.0.0.1:{}/api/projects/{}/status",
         port, project_id
@@ -100,7 +104,8 @@ async fn show_live_status(out: &Output, project_id: &str, port: u16, filter: Opt
         }
         Err(e) => {
             if e.is_connect() {
-                out.step("status").fail_untimed(&format!("can't reach web server on port {}", port));
+                out.step("status")
+                    .fail_untimed(&format!("can't reach web server on port {}", port));
                 Ok(())
             } else {
                 out.step("status").fail_untimed(&format!("{}", e));

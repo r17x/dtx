@@ -48,3 +48,6 @@ openai = []
 ollama = []
 llamacpp = []
 mcp = []
+
+[lints]
+workspace = true

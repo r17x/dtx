@@ -1,6 +1,6 @@
 //! HTML page handlers.
 
-use askama::Template;
+use askama_axum::Template;
 use axum::extract::{Query, State};
 use dtx_core::model::Service as ModelService;
 use dtx_core::resource::{Resource, ResourceState};

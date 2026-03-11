@@ -43,10 +43,7 @@ pub fn create_router(state: AppState) -> Router {
         // Project config & mappings
         .route("/config", get(handlers::api::get_project_config))
         .route("/mappings", post(handlers::api::add_mapping))
-        .route(
-            "/mappings/:command",
-            delete(handlers::api::remove_mapping),
-        )
+        .route("/mappings/:command", delete(handlers::api::remove_mapping))
         .route("/commands", post(handlers::api::add_to_command_list))
         .route("/packages", get(handlers::api::get_package_analysis))
         // Inline file editing
@@ -102,14 +99,8 @@ pub fn create_router(state: AppState) -> Router {
         // Package mappings
         .route("/partials/mappings", get(handlers::htmx::mappings_panel))
         .route("/mappings", post(handlers::htmx::add_mapping))
-        .route(
-            "/mappings/:command",
-            delete(handlers::htmx::remove_mapping),
-        )
-        .route(
-            "/mark-local/:command",
-            post(handlers::htmx::mark_as_local),
-        )
+        .route("/mappings/:command", delete(handlers::htmx::remove_mapping))
+        .route("/mark-local/:command", post(handlers::htmx::mark_as_local))
         .route(
             "/mark-ignore/:command",
             post(handlers::htmx::mark_as_ignore),

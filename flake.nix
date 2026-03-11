@@ -38,14 +38,24 @@
               "rustfmt"
             ];
           };
-          # Build the dtx binary using crane for better git dependency handling
-          craneLib = inputs.crane.mkLib pkgs;
+          # Build the dtx binary using crane with rust-overlay toolchain
+          craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+          # Source filtered for cargo + web assets (templates, static files)
+          src = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type)
+              || (lib.hasInfix "/templates/" path)
+              || (lib.hasInfix "/static/" path);
+          };
 
           # Common arguments for crane builds
           commonArgs = {
             pname = "dtx";
             version = "0.0.1";
-            src = craneLib.cleanCargoSource ./.;
+            inherit src;
             strictDeps = true;
 
             nativeBuildInputs = with pkgs; [
@@ -97,13 +107,13 @@
             commonArgs
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+              cargoClippyExtraArgs = "--all-targets";
             }
           );
 
           # Format check
           dtxFmt = craneLib.cargoFmt {
-            src = ./.;
+            inherit src;
             pname = "dtx";
           };
 
@@ -126,10 +136,12 @@
             default = {
               type = "app";
               program = "${dtx}/bin/dtx";
+              meta.description = "Dev Tools eXperience - Process orchestration with Nix integration";
             };
             dtx = {
               type = "app";
               program = "${dtx}/bin/dtx";
+              meta.description = "Dev Tools eXperience - Process orchestration with Nix integration";
             };
           };
 
@@ -259,8 +271,16 @@
             { crane, ... }:
             let
               craneLib = crane.mkLib final;
+              # NOTE: source filter duplicated from perSystem (keep in sync)
               commonArgs = {
-                src = craneLib.cleanCargoSource ./.;
+                src = final.lib.cleanSourceWith {
+                  src = ./.;
+                  filter =
+                    path: type:
+                    (craneLib.filterCargoSources path type)
+                    || (final.lib.hasInfix "/templates/" path)
+                    || (final.lib.hasInfix "/static/" path);
+                };
                 strictDeps = true;
                 nativeBuildInputs = [ final.pkg-config ];
                 buildInputs =

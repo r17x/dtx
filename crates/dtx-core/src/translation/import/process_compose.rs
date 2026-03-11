@@ -120,9 +120,10 @@ impl Environment {
                                 key = %k,
                                 "Environment variable has complex type; converting with to_string"
                             );
-                            format!("{}", serde_yaml::to_string(&other)
+                            serde_yaml::to_string(&other)
                                 .unwrap_or_default()
-                                .trim())
+                                .trim()
+                                .to_string()
                         }
                     };
                     format!("{}={}", k, value_str)
@@ -208,9 +209,19 @@ processes:
         let importer = ProcessComposeImporter::new();
         let result = importer.import(yaml).unwrap();
 
-        let pg = result.resources.iter().find(|r| r.name == "postgres").unwrap();
-        assert_eq!(pg.environment.get("PGDATA"), Some(&"/var/lib/postgresql/data".to_string()));
-        assert_eq!(pg.environment.get("POSTGRES_USER"), Some(&"admin".to_string()));
+        let pg = result
+            .resources
+            .iter()
+            .find(|r| r.name == "postgres")
+            .unwrap();
+        assert_eq!(
+            pg.environment.get("PGDATA"),
+            Some(&"/var/lib/postgresql/data".to_string())
+        );
+        assert_eq!(
+            pg.environment.get("POSTGRES_USER"),
+            Some(&"admin".to_string())
+        );
     }
 
     #[test]
@@ -227,7 +238,10 @@ processes:
         let result = importer.import(yaml).unwrap();
 
         let api = result.resources.iter().find(|r| r.name == "api").unwrap();
-        assert_eq!(api.environment.get("NODE_ENV"), Some(&"production".to_string()));
+        assert_eq!(
+            api.environment.get("NODE_ENV"),
+            Some(&"production".to_string())
+        );
         assert_eq!(api.environment.get("PORT"), Some(&"3000".to_string()));
     }
 }
