@@ -1,0 +1,216 @@
+//! TUI rendering.
+
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    Frame,
+};
+
+use super::app::{App, DisplayState, ServiceDisplayInfo};
+
+/// Main draw function with service infos.
+pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Main content
+            Constraint::Length(3), // Footer
+        ])
+        .split(f.area());
+
+    draw_header(f, chunks[0]);
+    draw_main(f, app, service_infos, chunks[1]);
+    draw_footer(f, app, chunks[2]);
+}
+
+/// Draw the header.
+fn draw_header(f: &mut Frame, area: Rect) {
+    let header = Paragraph::new(vec![Line::from(vec![
+        Span::styled(
+            " dtx ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled("native", Style::default().fg(Color::Cyan)),
+        Span::raw(" process manager"),
+    ])])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+
+    f.render_widget(header, area);
+}
+
+/// Draw the main content area (services + logs).
+fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(30), // Services
+            Constraint::Percentage(70), // Logs
+        ])
+        .split(area);
+
+    // Get selected service name for log filtering
+    let selected_service = service_infos.get(app.selected).map(|s| s.name.as_str());
+
+    draw_services(f, app, service_infos, chunks[0]);
+    draw_logs(f, app, selected_service, chunks[1]);
+}
+
+/// Draw the service list.
+fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
+    let items: Vec<ListItem> = service_infos
+        .iter()
+        .enumerate()
+        .map(|(i, svc)| {
+            let (indicator, color) = match &svc.state {
+                DisplayState::Running { .. } => ("●", Color::Green),
+                DisplayState::Starting => ("◐", Color::Yellow),
+                DisplayState::Pending => ("○", Color::Yellow),
+                DisplayState::Stopped => ("○", Color::DarkGray),
+                DisplayState::Completed { .. } => ("✓", Color::Blue),
+                DisplayState::Failed { .. } => ("✗", Color::Red),
+            };
+
+            let state_label = match &svc.state {
+                DisplayState::Running { .. } => "RUN",
+                DisplayState::Starting => "STR",
+                DisplayState::Pending => "PND",
+                DisplayState::Stopped => "STP",
+                DisplayState::Completed { .. } => "DON",
+                DisplayState::Failed { .. } => "ERR",
+            };
+
+            let restart_info = if svc.restarts > 0 {
+                format!(" ({})", svc.restarts)
+            } else {
+                String::new()
+            };
+
+            let style = if i == app.selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            let content = Line::from(vec![
+                Span::styled(format!(" {} ", indicator), Style::default().fg(color)),
+                Span::styled(&svc.name, style),
+                Span::styled(
+                    format!(" [{}]{}", state_label, restart_info),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let services = List::new(items).block(
+        Block::default()
+            .title(" Services ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+
+    f.render_widget(services, area);
+}
+
+/// Draw the log panel (filtered by selected service).
+fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rect) {
+    // Calculate how many lines we can show
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    // Filter logs by selected service
+    let filtered_logs: Vec<_> = if let Some(service_name) = selected_service {
+        app.logs
+            .iter()
+            .filter(|log| log.service == service_name)
+            .collect()
+    } else {
+        app.logs.iter().collect()
+    };
+
+    // Get the last N log lines
+    let skip_count = filtered_logs.len().saturating_sub(inner_height);
+    let visible_logs: Vec<Line> = filtered_logs
+        .into_iter()
+        .skip(skip_count)
+        .map(|log| {
+            let content_style = if log.is_stderr {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+
+            Line::from(vec![Span::styled(&log.content, content_style)])
+        })
+        .collect();
+
+    // Title shows selected service name
+    let title = match selected_service {
+        Some(name) => format!(" Logs: {} ", name),
+        None => " Logs ".to_string(),
+    };
+
+    let logs = Paragraph::new(visible_logs)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(logs, area);
+}
+
+/// Draw the footer with keybindings.
+fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let keybindings = [
+        ("q", "Quit"),
+        ("↑↓", "Select"),
+        ("r", "Restart"),
+        ("s", "Stop"),
+        ("c", "Clear"),
+    ];
+
+    let mut spans = Vec::new();
+    for (i, (key, action)) in keybindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {}", action)));
+    }
+
+    // Add status message if present
+    if let Some(ref msg) = app.status_message {
+        spans.push(Span::raw("  │  "));
+        spans.push(Span::styled(msg, Style::default().fg(Color::Yellow)));
+    }
+
+    let footer = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+
+    f.render_widget(footer, area);
+}

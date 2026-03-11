@@ -1,0 +1,181 @@
+{% comment %}
+  Service Graph - D3.js force-directed dependency graph
+
+  Props:
+  - services: Vec<Service> - List of services with id, name, status, port, package, enabled
+  - dependencies: Vec<Dependency> - List of dependencies with service_id and depends_on array
+{% endcomment %}
+
+<div class="dtx-graph" id="graph-container" style="width: 100%; height: 600px; background: #161b22; border: 1px solid #2d333b; border-radius: 4px; position: relative;">
+  <div class="graph-loading" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #6b7280; display: none;">
+    <div class="spinner"></div>
+    <p>Loading graph...</p>
+  </div>
+</div>
+
+<script>
+  // Initialize service graph once D3 is loaded
+  (function() {
+    // Service data from template
+    const services = {{ services|json|safe }};
+    const dependencies = {{ dependencies|json|safe }};
+
+    // Wait for D3 to be available
+    function initGraph() {
+      if (typeof d3 === 'undefined' || typeof ServiceGraph === 'undefined') {
+        console.warn('D3.js or ServiceGraph not loaded yet, retrying...');
+        setTimeout(initGraph, 100);
+        return;
+      }
+
+      const container = document.getElementById('graph-container');
+      if (!container) {
+        console.error('Graph container not found');
+        return;
+      }
+
+      // Create graph instance
+      window.serviceGraph = new ServiceGraph(container, services, dependencies);
+
+      // Set up SSE listener for real-time status updates
+      const eventSource = new EventSource('/sse/events');
+
+      eventSource.addEventListener('service_status', function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.service_id && data.status && window.serviceGraph) {
+            window.serviceGraph.updateStatus(data.service_id, data.status);
+          }
+        } catch (err) {
+          console.error('Failed to parse SSE event:', err);
+        }
+      });
+
+      eventSource.addEventListener('error', function(event) {
+        console.error('SSE connection error:', event);
+        // Attempt to reconnect
+        setTimeout(() => {
+          eventSource.close();
+          initGraph();
+        }, 5000);
+      });
+
+      // Handle window resize
+      let resizeTimeout;
+      window.addEventListener('resize', function() {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => {
+          if (window.serviceGraph) {
+            window.serviceGraph.resize();
+          }
+        }, 250);
+      });
+
+      // Set up search integration
+      const searchInput = document.querySelector('#graph-search');
+      if (searchInput) {
+        searchInput.addEventListener('input', function(e) {
+          if (window.serviceGraph) {
+            window.serviceGraph.filter(e.target.value);
+          }
+        });
+      }
+
+      // Set up mode toggle
+      const modeToggle = document.querySelector('#graph-mode-toggle');
+      if (modeToggle) {
+        modeToggle.addEventListener('change', function(e) {
+          if (window.serviceGraph) {
+            window.serviceGraph.setMode(e.target.value);
+          }
+        });
+      }
+
+      // Cleanup on page unload
+      window.addEventListener('beforeunload', function() {
+        if (window.serviceGraph) {
+          window.serviceGraph.destroy();
+        }
+        if (eventSource) {
+          eventSource.close();
+        }
+      });
+    }
+
+    // Start initialization
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initGraph);
+    } else {
+      initGraph();
+    }
+  })();
+</script>
+
+<style>
+  .dtx-graph {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .service-graph-svg {
+    display: block;
+    cursor: grab;
+  }
+
+  .service-graph-svg:active {
+    cursor: grabbing;
+  }
+
+  .node {
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+
+  .node:hover circle {
+    stroke-width: 3 !important;
+    filter: brightness(1.2);
+  }
+
+  .node-abbr {
+    user-select: none;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+  }
+
+  .node-label {
+    user-select: none;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+  }
+
+  .links line {
+    transition: stroke-opacity 0.3s ease;
+  }
+
+  .graph-loading {
+    text-align: center;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+  }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 16px;
+    border: 3px solid rgba(107, 114, 128, 0.3);
+    border-top-color: #22d3ee;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Status-based node animations */
+  .node circle[filter="url(#glow)"] {
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+  }
+</style>

@@ -1,0 +1,15 @@
+{# Status Panel - Shows project status with cyberpunk styling #}
+
+<div class="flex items-center gap-3">
+    {% if running %}
+    <span class="dtx-status-badge dtx-status-badge--running">
+        <span class="dtx-status-badge__indicator"></span>
+        {{ status }}
+    </span>
+    {% else %}
+    <span class="dtx-status-badge dtx-status-badge--stopped">
+        <span class="dtx-status-badge__indicator"></span>
+        {{ status }}
+    </span>
+    {% endif %}
+</div>

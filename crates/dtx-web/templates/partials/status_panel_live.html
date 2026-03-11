@@ -1,0 +1,73 @@
+{# Status Panel Live - SSE-updated status panel with cyberpunk styling #}
+
+<div hx-ext="sse"
+     sse-connect="/sse/status"
+     sse-swap="status"
+     id="live-status-panel"
+     class="flex items-center gap-3">
+
+    <div id="status-content" sse-swap="status" hx-swap="innerHTML">
+        <!-- Initial loading state -->
+        <span class="dtx-status-badge dtx-status-badge--starting">
+            <span class="dtx-status-badge__indicator"></span>
+            Connecting...
+        </span>
+    </div>
+
+    <div class="flex items-center gap-4 text-sm font-mono">
+        <span id="running-count" class="text-status-running">0 running</span>
+        <span id="starting-count" class="text-status-starting">0 starting</span>
+        <span id="stopped-count" class="text-status-stopped">0 stopped</span>
+    </div>
+</div>
+
+<script>
+    // Handle status updates from SSE
+    document.addEventListener('htmx:sseMessage', function(evt) {
+        if (evt.detail.type === 'status') {
+            try {
+                const data = JSON.parse(evt.detail.data);
+                updateStatusDisplay(data);
+            } catch (e) {
+                console.error('Failed to parse status update:', e);
+            }
+        }
+    });
+
+    function updateStatusDisplay(data) {
+        const container = document.getElementById('status-content');
+        if (!container) return;
+
+        const running = data.running;
+        const serviceCount = data.services ? data.services.length : 0;
+        const runningCount = data.services ? data.services.filter(s => s.is_running).length : 0;
+        const startingCount = data.services ? data.services.filter(s => s.is_starting).length : 0;
+        const stoppedCount = serviceCount - runningCount - startingCount;
+
+        // Update badge
+        if (running && runningCount > 0) {
+            container.innerHTML = `
+                <span class="dtx-status-badge dtx-status-badge--running">
+                    <span class="dtx-status-badge__indicator"></span>
+                    Running (${runningCount}/${serviceCount})
+                </span>
+            `;
+        } else {
+            container.innerHTML = `
+                <span class="dtx-status-badge dtx-status-badge--stopped">
+                    <span class="dtx-status-badge__indicator"></span>
+                    Stopped
+                </span>
+            `;
+        }
+
+        // Update counts
+        const runningEl = document.getElementById('running-count');
+        const startingEl = document.getElementById('starting-count');
+        const stoppedEl = document.getElementById('stopped-count');
+
+        if (runningEl) runningEl.textContent = `${runningCount} running`;
+        if (startingEl) startingEl.textContent = `${startingCount} starting`;
+        if (stoppedEl) stoppedEl.textContent = `${stoppedCount} stopped`;
+    }
+</script>

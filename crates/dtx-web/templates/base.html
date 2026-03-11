@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}dtx{% endblock %}</title>
+
+    <!-- Fonts (self-hosted) -->
+    <link rel="stylesheet" href="/static/css/fonts.css">
+
+    <!-- Tailwind CSS (pre-built) -->
+    <link rel="stylesheet" href="/static/css/tailwind.css">
+
+    <!-- Theme CSS -->
+    <link rel="stylesheet" href="/static/css/theme.css">
+
+    <!-- HTMX (local) -->
+    <script src="/static/js/htmx.min.js"></script>
+    <script src="/static/js/htmx-json-enc.js"></script>
+    <script src="/static/js/htmx-sse.js"></script>
+
+    <!-- D3.js for service graph (local) -->
+    <script src="/static/js/d3.v7.min.js"></script>
+
+    <style>
+        [x-cloak] { display: none !important; }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0d1117;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2d333b;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3d444d;
+        }
+
+        /* HTMX loading indicator */
+        .htmx-indicator {
+            display: none;
+        }
+        .htmx-request .htmx-indicator {
+            display: inline-flex;
+        }
+        .htmx-request.htmx-indicator {
+            display: inline-flex;
+        }
+
+        /* Spinner animation */
+        .dtx-spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid currentColor;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: dtx-spin 0.75s linear infinite;
+        }
+
+        @keyframes dtx-spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Button disabled state */
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+    </style>
+
+    {% block head %}{% endblock %}
+</head>
+<body class="dtx-theme bg-dtx-bg text-gray-200 h-screen flex flex-col overflow-hidden font-mono" {% block body_attrs %}{% endblock %}>
+    {% block header %}
+    <!-- Header -->
+    <header class="dtx-header">
+        <!-- Main Header Row -->
+        <div class="dtx-header__main">
+            <!-- Logo + Version -->
+            <div class="flex items-center gap-4">
+                <a href="/" class="dtx-header__logo">
+                    <span class="dtx-header__logo-icon">&#x25C9;</span>
+                    <span class="dtx-header__logo-text">dtx</span>
+                </a>
+                <span class="dtx-header__version">v0.1.0</span>
+            </div>
+
+            <!-- Stats (populated via HTMX on project pages) -->
+            <div id="header-stats" class="dtx-header__stats">
+                {% block header_stats %}
+                <div class="dtx-header__stat">
+                    <span class="dtx-header__stat-value text-gray-400">-</span>
+                    <span class="dtx-header__stat-label">services</span>
+                </div>
+                {% endblock %}
+            </div>
+
+            <!-- Actions -->
+            <div class="dtx-header__actions">
+                {% block header_actions %}{% endblock %}
+
+                <!-- Terminal Button -->
+                <button onclick="toggleTerminal()" class="dtx-btn dtx-btn--primary dtx-btn--sm">
+                    <span>&gt;_</span>
+                    <span>Terminal</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Meta Line -->
+        <div class="dtx-header__meta">
+            {% block header_meta %}
+            SECTOR: LOCAL // STATUS: <span class="text-status-running">ONLINE</span> // <span id="header-uptime">UPTIME: -</span>
+            {% endblock %}
+        </div>
+    </header>
+    {% endblock %}
+
+    <!-- Main Content -->
+    <main class="flex-1 overflow-auto">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    {% block footer %}
+    <footer class="bg-dtx-panel border-t border-dtx-border py-4 px-6">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <p class="text-xs text-gray-500 font-mono">
+                dtx - Dev Tools eXperience
+            </p>
+            <div class="flex items-center gap-4 text-xs text-gray-500">
+                <span>Press <kbd class="px-1.5 py-0.5 rounded bg-dtx-card border border-dtx-border">?</kbd> for help</span>
+            </div>
+        </div>
+    </footer>
+    {% endblock %}
+
+    <!-- Terminal / Log Viewer (hidden by default) -->
+    <div id="terminal" class="dtx-terminal" data-open="false">
+        <header class="dtx-terminal__header" onclick="toggleTerminal()">
+            <div class="dtx-terminal__title">
+                <span class="dtx-terminal__title-icon">&gt;_</span>
+                <span>LOGS</span>
+                <span class="dtx-terminal__status" id="terminal-status">IDLE</span>
+            </div>
+            <div class="flex items-center gap-4">
+                <span class="dtx-terminal__hint">Press <kbd>ESC</kbd> to toggle</span>
+                <button class="text-gray-400 hover:text-white text-lg">&times;</button>
+            </div>
+        </header>
+
+        <div id="terminal-output" class="dtx-terminal__output">
+            <div class="text-gray-500"># Service logs will appear here when services are running</div>
+        </div>
+    </div>
+
+    <!-- Detail Panel (hidden by default) -->
+    <aside id="detail-panel-container" class="dtx-detail-panel" data-open="false">
+        <div id="detail-panel">
+            <!-- Content loaded via HTMX -->
+        </div>
+    </aside>
+
+    <!-- Keyboard Help Modal -->
+    <div id="keyboard-help-modal" class="dtx-modal-overlay hidden" onclick="this.classList.add('hidden')">
+        <div class="dtx-modal" onclick="event.stopPropagation()">
+            <h2 class="dtx-modal__title font-mono">Keyboard Shortcuts</h2>
+            <div class="dtx-modal__shortcuts font-mono">
+                <div class="dtx-modal__shortcut">
+                    <span class="dtx-modal__shortcut-label">Toggle terminal</span>
+                    <kbd class="dtx-modal__shortcut-key">ESC</kbd>
+                </div>
+                <div class="dtx-modal__shortcut">
+                    <span class="dtx-modal__shortcut-label">Focus terminal</span>
+                    <kbd class="dtx-modal__shortcut-key">/</kbd>
+                </div>
+                <div class="dtx-modal__shortcut">
+                    <span class="dtx-modal__shortcut-label">Show this help</span>
+                    <kbd class="dtx-modal__shortcut-key">?</kbd>
+                </div>
+                <div class="dtx-modal__shortcut">
+                    <span class="dtx-modal__shortcut-label">Close panels</span>
+                    <kbd class="dtx-modal__shortcut-key">ESC</kbd>
+                </div>
+            </div>
+            <button onclick="this.parentElement.parentElement.classList.add('hidden')"
+                    class="dtx-btn dtx-btn--ghost w-full mt-4">
+                Close
+            </button>
+        </div>
+    </div>
+
+    <!-- Screen reader announcements -->
+    <div aria-live="polite" id="announcements" class="dtx-sr-only"></div>
+
+    <script>
+        // Terminal toggle
+        function toggleTerminal(forceOpen) {
+            const terminal = document.getElementById('terminal');
+            const isOpen = terminal.dataset.open === 'true';
+            const shouldOpen = forceOpen !== undefined ? forceOpen : !isOpen;
+
+            terminal.dataset.open = shouldOpen;
+
+            if (shouldOpen) {
+                // Auto-start log streaming if available (only on homepage with a project)
+                if (window.terminalLogs && !window._terminalAutoStreaming) {
+                    window._terminalAutoStreaming = true;
+                    window.terminalLogs.start('all');
+                }
+            } else {
+                // Stop streaming when terminal is closed
+                if (window.terminalLogs && window._terminalAutoStreaming) {
+                    window.terminalLogs.stop();
+                    window._terminalAutoStreaming = false;
+                }
+            }
+        }
+
+        // Detail panel toggle
+        function openDetailPanel() {
+            const panel = document.getElementById('detail-panel-container');
+            panel.dataset.open = 'true';
+        }
+
+        function closeDetailPanel() {
+            const panel = document.getElementById('detail-panel-container');
+            panel.dataset.open = 'false';
+        }
+
+        // Keyboard help modal
+        function showKeyboardHelp() {
+            document.getElementById('keyboard-help-modal').classList.remove('hidden');
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Don't trigger shortcuts when typing in inputs
+            const isInput = e.target.matches('input, textarea');
+
+            // ESC - close panels/terminal
+            if (e.key === 'Escape') {
+                const terminal = document.getElementById('terminal');
+                const detailPanel = document.getElementById('detail-panel-container');
+                const helpModal = document.getElementById('keyboard-help-modal');
+
+                // Close any open modal overlay first
+                const openModal = document.querySelector('.dtx-modal-overlay:not(.hidden)');
+                if (openModal) {
+                    openModal.classList.add('hidden');
+                    return;
+                }
+
+                if (detailPanel.dataset.open === 'true') {
+                    closeDetailPanel();
+                } else if (terminal.dataset.open === 'true') {
+                    toggleTerminal(false);
+                }
+                return;
+            }
+
+            // Skip other shortcuts if in input
+            if (isInput) return;
+
+            // / - focus terminal
+            if (e.key === '/') {
+                e.preventDefault();
+                toggleTerminal(true);
+            }
+
+            // ? - show keyboard help
+            if (e.key === '?') {
+                e.preventDefault();
+                showKeyboardHelp();
+            }
+        });
+
+        // SSE reconnection handling
+        document.body.addEventListener('htmx:sseError', function(evt) {
+            console.log('SSE error, reconnecting in 3s...', evt.detail);
+            setTimeout(() => {
+                htmx.trigger(evt.detail.elt, 'htmx:sseReconnect');
+            }, 3000);
+        });
+
+        document.body.addEventListener('htmx:sseClose', function(evt) {
+            console.log('SSE closed, reconnecting in 3s...');
+            setTimeout(() => {
+                htmx.trigger(evt.detail.elt, 'htmx:sseReconnect');
+            }, 3000);
+        });
+
+        document.body.addEventListener('htmx:sseOpen', function(evt) {
+            console.log('SSE connected');
+        });
+
+        // Update uptime counter - uses server uptime if available
+        const serverUptimeSecs = parseInt(document.body.dataset.serverUptime || '0', 10);
+        const pageLoadTime = Date.now();
+
+        function updateUptime() {
+            // Calculate total uptime: server uptime at page load + time since page load
+            const additionalSecs = Math.floor((Date.now() - pageLoadTime) / 1000);
+            const totalSecs = serverUptimeSecs + additionalSecs;
+
+            const hours = Math.floor(totalSecs / 3600);
+            const minutes = Math.floor((totalSecs % 3600) / 60);
+            const seconds = totalSecs % 60;
+
+            let uptimeStr = '';
+            if (hours > 0) {
+                uptimeStr = `${hours}h ${minutes}m`;
+            } else if (minutes > 0) {
+                uptimeStr = `${minutes}m ${seconds}s`;
+            } else {
+                uptimeStr = `${seconds}s`;
+            }
+
+            const uptimeEl = document.getElementById('header-uptime');
+            if (uptimeEl) {
+                uptimeEl.textContent = `UPTIME: ${uptimeStr}`;
+            }
+        }
+        setInterval(updateUptime, 1000);
+        updateUptime();
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

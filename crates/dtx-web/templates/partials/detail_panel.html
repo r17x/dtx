@@ -1,0 +1,243 @@
+{# Detail Panel Content #}
+{# This template is loaded via HTMX into #detail-panel when a service is selected #}
+
+<div class="h-full flex flex-col" data-service-name="{{ service.name }}">
+    <!-- Header -->
+    <header class="dtx-detail-panel__header">
+        <div class="dtx-detail-panel__title">
+            <div class="dtx-detail-panel__title-icon">
+                {% match service.package %}{% when Some with (_) %}<span>&#x2699;</span>{% when None %}<span>&#x25A0;</span>{% endmatch %}
+            </div>
+            <div class="dtx-detail-panel__title-text">
+                <h2>{{ service.name|upper }}</h2>
+                <span>{% match service.package %}{% when Some with (_) %}Nix Service{% when None %}Custom Service{% endmatch %}</span>
+            </div>
+        </div>
+        <button onclick="closeDetailPanel()" class="dtx-detail-panel__close" aria-label="Close panel">
+            &times;
+        </button>
+    </header>
+
+    <!-- Status Badge -->
+    <div id="detail-status-badge" class="px-4 py-3 border-b border-dtx-border">
+        {% include "partials/status_badge.html" %}
+    </div>
+
+    <!-- Tab Bar (similar to project_detail) -->
+    <div class="bg-dtx-panel border-b border-dtx-border">
+        <nav class="dtx-tabs px-4">
+            <button onclick="showDetailTab('overview')" id="detail-tab-overview" class="dtx-tab dtx-tab--active">
+                Overview
+            </button>
+            <button onclick="showDetailTab('logs')" id="detail-tab-logs" class="dtx-tab">
+                Logs
+            </button>
+            <button onclick="showDetailTab('nix')" id="detail-tab-nix" class="dtx-tab">
+                Nix
+            </button>
+        </nav>
+    </div>
+
+    <!-- Tab Contents -->
+    <div class="flex-1 overflow-hidden">
+        <!-- Overview Tab (Default) -->
+        <div id="detail-content-overview" class="detail-tab-content h-full overflow-y-auto">
+            <div class="dtx-detail-panel__body space-y-6">
+                <!-- Info Grid -->
+                <div class="dtx-detail-panel__grid">
+                    <div>
+                        <div class="dtx-detail-panel__field-label">PORT</div>
+                        <div class="dtx-detail-panel__field-value">
+                            {% match service.port %}{% when Some with (port) %}{{ port }}{% when None %}-{% endmatch %}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="dtx-detail-panel__field-label">PACKAGE</div>
+                        <div class="dtx-detail-panel__field-value dtx-detail-panel__field-value--purple">
+                            {% match service.package %}{% when Some with (pkg) %}{{ pkg }}{% when None %}-{% endmatch %}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="dtx-detail-panel__field-label">STATUS</div>
+                        <div class="dtx-detail-panel__field-value">
+                            {{ status }}
+                        </div>
+                    </div>
+                    <div>
+                        <div class="dtx-detail-panel__field-label">ENABLED</div>
+                        <div class="dtx-detail-panel__field-value">
+                            {% if service.enabled %}Yes{% else %}No{% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dependencies -->
+                {% match service.depends_on %}
+                {% when Some with (deps) %}
+                <div class="dtx-detail-panel__section">
+                    <div class="dtx-detail-panel__section-title">Depends On</div>
+                    <div class="flex flex-wrap gap-2">
+                        {% for dep in deps %}
+                        <span class="dtx-tag">{{ dep.service }}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% when None %}
+                {% endmatch %}
+
+                <!-- Command -->
+                <div class="dtx-detail-panel__section">
+                    <div class="dtx-detail-panel__section-title">Command</div>
+                    <pre class="dtx-detail-panel__code">{{ service.command }}</pre>
+                </div>
+
+                <!-- Environment -->
+                {% match service.environment %}
+                {% when Some with (env) %}
+                <div class="dtx-detail-panel__section">
+                    <div class="dtx-detail-panel__section-title">Environment</div>
+                    <pre class="dtx-detail-panel__code">{% for item in env %}{{ item.0 }}={{ item.1 }}
+{% endfor %}</pre>
+                </div>
+                {% when None %}
+                {% endmatch %}
+
+                <!-- Health Check -->
+                {% match service.health_check %}
+                {% when Some with (_) %}
+                <div class="dtx-detail-panel__section">
+                    <div class="dtx-detail-panel__section-title">Health Check</div>
+                    <pre class="dtx-detail-panel__code">Configured</pre>
+                </div>
+                {% when None %}
+                {% endmatch %}
+            </div>
+        </div>
+
+        <!-- Logs Tab -->
+        <div id="detail-content-logs" class="detail-tab-content hidden h-full flex flex-col">
+            <div class="dtx-detail-panel__body flex-1 flex flex-col">
+                <div class="dtx-detail-panel__section flex-1 flex flex-col">
+                    <div class="dtx-detail-panel__section-title flex justify-between items-center">
+                        <span>Live Logs</span>
+                        <button onclick="toggleLogStream('{{ service.name }}')" id="log-stream-toggle" class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                            Start Stream
+                        </button>
+                    </div>
+                    <div id="detail-logs-output" class="dtx-detail-panel__code flex-1 min-h-[200px] max-h-[400px] overflow-y-auto font-mono text-xs">
+                        <span class="text-gray-500">Click "Start Stream" to view live logs...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Nix Tab (project-level, loaded via HTMX) -->
+        <div id="detail-content-nix" class="detail-tab-content hidden h-full overflow-y-auto"
+             hx-get="/htmx/partials/nix-panel"
+             hx-trigger="intersect once"
+             hx-swap="innerHTML">
+            <div class="flex items-center justify-center py-8 text-gray-500">
+                <div class="w-5 h-5 border-2 border-status-active border-t-transparent rounded-full animate-spin mr-2"></div>
+                Loading Nix environment...
+            </div>
+        </div>
+    </div>
+
+    <!-- Actions Footer -->
+    <footer class="dtx-detail-panel__footer">
+        {% if status == "running" %}
+        <button hx-post="/api/services/{{ service.name }}/stop"
+                hx-target="#detail-panel"
+                hx-swap="innerHTML"
+                class="dtx-btn dtx-btn--danger flex-1">
+            Stop Service
+        </button>
+        {% else %}
+        <button hx-post="/api/services/{{ service.name }}/start"
+                hx-target="#detail-panel"
+                hx-swap="innerHTML"
+                class="dtx-btn dtx-btn--success flex-1">
+            Start Service
+        </button>
+        {% endif %}
+    </footer>
+</div>
+
+<script>
+// Detail panel tab switching
+function showDetailTab(tabName) {
+    // Hide all tab contents
+    document.querySelectorAll('.detail-tab-content').forEach(content => {
+        content.classList.add('hidden');
+    });
+
+    // Remove active state from all tab buttons
+    document.querySelectorAll('#detail-panel .dtx-tab').forEach(button => {
+        button.classList.remove('dtx-tab--active');
+    });
+
+    // Show selected tab content
+    const content = document.getElementById('detail-content-' + tabName);
+    if (content) {
+        content.classList.remove('hidden');
+    }
+
+    // Add active state to selected tab button
+    const tabBtn = document.getElementById('detail-tab-' + tabName);
+    if (tabBtn) {
+        tabBtn.classList.add('dtx-tab--active');
+    }
+}
+
+// Log streaming for detail panel
+let detailLogSource = null;
+
+function toggleLogStream(serviceName) {
+    const toggleBtn = document.getElementById('log-stream-toggle');
+    const output = document.getElementById('detail-logs-output');
+
+    if (detailLogSource) {
+        // Stop streaming
+        detailLogSource.close();
+        detailLogSource = null;
+        toggleBtn.textContent = 'Start Stream';
+        toggleBtn.classList.remove('dtx-btn--danger');
+        toggleBtn.classList.add('dtx-btn--ghost');
+    } else {
+        // Start streaming
+        output.innerHTML = '<span class="text-dtx-cyan">Connecting to log stream...</span>\n';
+
+        detailLogSource = new EventSource(`/sse/logs/${serviceName}`);
+
+        detailLogSource.onmessage = function(e) {
+            const line = document.createElement('div');
+            line.textContent = e.data;
+            output.appendChild(line);
+            output.scrollTop = output.scrollHeight;
+        };
+
+        detailLogSource.onerror = function() {
+            output.innerHTML += '<span class="text-status-error">Log stream disconnected</span>\n';
+            detailLogSource.close();
+            detailLogSource = null;
+            toggleBtn.textContent = 'Start Stream';
+            toggleBtn.classList.remove('dtx-btn--danger');
+            toggleBtn.classList.add('dtx-btn--ghost');
+        };
+
+        toggleBtn.textContent = 'Stop Stream';
+        toggleBtn.classList.remove('dtx-btn--ghost');
+        toggleBtn.classList.add('dtx-btn--danger');
+    }
+}
+
+// Cleanup when panel is closed
+document.addEventListener('htmx:beforeSwap', function(evt) {
+    if (evt.detail.target && evt.detail.target.id === 'detail-panel') {
+        if (detailLogSource) {
+            detailLogSource.close();
+            detailLogSource = null;
+        }
+    }
+});
+</script>

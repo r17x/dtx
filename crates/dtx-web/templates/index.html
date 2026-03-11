@@ -1,0 +1,924 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block body_attrs %}data-server-uptime="{{ server_uptime_secs }}"{% endblock %}
+
+{% block header_stats %}
+<div class="dtx-header__stat">
+    <span class="dtx-header__stat-value text-status-active">{{ services.len() }}</span>
+    <span class="dtx-header__stat-label">services</span>
+</div>
+<div class="dtx-header__stat">
+    <span class="dtx-header__stat-value text-status-running" id="running-count">{{ running_count }}</span>
+    <span class="dtx-header__stat-label">running</span>
+</div>
+<div class="dtx-header__stat">
+    <span class="dtx-header__stat-value text-status-error" id="error-count">{{ error_count }}</span>
+    <span class="dtx-header__stat-label">errors</span>
+</div>
+{% endblock %}
+
+{% block header_meta %}
+SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-running">{{ running_count }} RUNNING</span>{% else %}<span class="text-gray-500">ALL STOPPED</span>{% endif %} // <span id="header-uptime">UPTIME: -</span>
+{% endblock %}
+
+{% block header_actions %}
+<!-- Project Context -->
+<div class="flex items-center gap-2">
+    <span class="dtx-dropdown__icon">&#x25C9;</span>
+    <span class="dtx-dropdown__label">{{ current_context }}</span>
+</div>
+
+{% if has_project %}
+<!-- Settings Button -->
+<a href="/settings" class="dtx-btn dtx-btn--ghost dtx-btn--sm" title="Settings">
+    <span>&#x2699;</span>
+    <span>Settings</span>
+</a>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="dtx-command-center">
+    <!-- Left Panel: Activity Feed -->
+    <aside class="dtx-command-center__sidebar">
+        {% if has_project %}
+        <div class="dtx-activity-feed">
+            <header class="dtx-activity-feed__header">
+                <h2 class="dtx-activity-feed__title">
+                    <span class="dtx-activity-feed__title-icon">&#x2699;</span>
+                    SERVICES
+                </h2>
+                <div class="flex items-center gap-2">
+                    <span class="dtx-activity-feed__count">{{ services.len() }}</span>
+                    <button onclick="showAddServiceModal()"
+                            class="text-gray-500 hover:text-status-active text-sm leading-none"
+                            title="Add Service">
+                        +
+                    </button>
+                </div>
+            </header>
+
+            <div class="dtx-activity-feed__list"
+                 id="service-list">
+
+                {% if services.is_empty() %}
+                <div class="px-4 py-8 text-center dtx-text-muted">
+                    <p>No services configured</p>
+                    <p class="text-xs mt-2">Run <code>dtx add &lt;service&gt;</code> to add one</p>
+                </div>
+                {% else %}
+                    {% for service in services %}
+                    <div class="group relative">
+                    <button class="dtx-activity-item"
+                            hx-get="/htmx/services/{{ service.name }}"
+                            hx-target="#detail-panel"
+                            hx-swap="innerHTML"
+                            hx-indicator=".dtx-activity-item__loading"
+                            onclick="openDetailPanel()"
+                            data-service-name="{{ service.name }}">
+
+                        <div class="dtx-activity-item__header">
+                            <div class="dtx-activity-item__service">
+                                <span>{{ service.name }}</span>
+                                <span class="dtx-activity-item__status-dot dtx-activity-item__status-dot--stopped"
+                                      id="status-dot-{{ service.name }}"
+                                      data-service-name="{{ service.name }}"></span>
+                            </div>
+                            <span class="dtx-activity-item__port">
+                                {% match service.port %}{% when Some with (port) %}:{{ port }}{% when None %}{% endmatch %}
+                            </span>
+                        </div>
+
+                        <p class="dtx-activity-item__message">
+                            {% match service.package %}
+                            {% when Some with (pkg) %}
+                            <span class="text-status-ephemeral">{{ pkg }}</span>
+                            {% when None %}
+                            <span class="text-gray-500">{{ service.command }}</span>
+                            {% endmatch %}
+                        </p>
+                        <span class="dtx-activity-item__loading htmx-indicator">Loading...</span>
+                    </button>
+                    <button class="absolute top-2 right-2 text-gray-600 hover:text-status-error text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                            hx-delete="/htmx/services/{{ service.name }}"
+                            hx-confirm="Delete service {{ service.name }}?"
+                            hx-swap="none"
+                            hx-on::after-request="if(event.detail.successful) window.location.reload()"
+                            onclick="event.stopPropagation()"
+                            title="Delete {{ service.name }}">
+                        &#x2715;
+                    </button>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+
+            <!-- Bulk Action -->
+            {% if has_services %}
+            <footer class="dtx-activity-feed__footer">
+                <button id="bulk-action-btn"
+                        class="dtx-btn {% if running_count > 0 %}dtx-btn--danger{% else %}dtx-btn--success{% endif %} flex-1"
+                        onclick="toggleBulkAction()">
+                    <span id="bulk-action-text">{% if running_count > 0 %}Stop All{% else %}Start All{% endif %}</span>
+                    <span id="bulk-action-spinner" style="display:none">
+                        <span class="dtx-spinner"></span>
+                    </span>
+                </button>
+            </footer>
+            {% endif %}
+        </div>
+        {% else %}
+        <!-- No Project Selected State -->
+        <div class="dtx-empty-state">
+            <div class="dtx-empty-state__icon">&#x25C9;</div>
+            <h3 class="dtx-empty-state__title">No Project Selected</h3>
+            <p class="dtx-empty-state__text">
+                Create a project to get started with dtx.
+            </p>
+            <div class="dtx-empty-state__actions">
+                <code class="dtx-code-block">dtx init my-project</code>
+
+                <div class="dtx-empty-state__divider">
+                    <span>OR</span>
+                </div>
+
+                <button class="dtx-btn dtx-btn--primary"
+                        hx-post="/api/project/init-cwd"
+                        hx-swap="none"
+                        hx-indicator=".dtx-empty-state__loading"
+                        title="Initialize project from current directory">
+                    <span>&#x2699;</span>
+                    Initialize Current Directory
+                </button>
+                <span class="dtx-empty-state__loading htmx-indicator">Initializing...</span>
+                <p class="dtx-empty-state__hint">
+                    Creates a project from: <code>{{ cwd }}</code>
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </aside>
+
+    <!-- Main Area: Service Graph -->
+    <main class="dtx-command-center__main">
+        {% if has_project && has_services %}
+        <!-- Signal Filter -->
+        <div class="dtx-signal-filter">
+            <div class="dtx-signal-filter__search">
+                <input type="text"
+                       id="graph-search"
+                       placeholder="Filter services..."
+                       oninput="filterServices(this.value)"
+                       autocomplete="off">
+            </div>
+            <div class="dtx-signal-filter__toggles">
+                <button id="filter-all"
+                        class="dtx-signal-filter__toggle dtx-signal-filter__toggle--active"
+                        onclick="setFilterMode('all')">
+                    All
+                </button>
+                <button id="filter-deps"
+                        class="dtx-signal-filter__toggle"
+                        onclick="setFilterMode('dependencies')">
+                    Dependencies
+                </button>
+            </div>
+        </div>
+
+        <!-- Graph Container -->
+        <div class="dtx-graph" id="graph-container">
+            <svg id="service-graph" width="100%" height="100%"></svg>
+            <div class="dtx-graph__grid"></div>
+        </div>
+        {% else %}
+        <!-- Empty Graph State -->
+        <div class="dtx-graph dtx-graph--empty">
+            <div class="dtx-graph__grid"></div>
+            <div class="dtx-empty-state">
+                {% if !has_project %}
+                <div class="dtx-empty-state__icon">&#x2B21;</div>
+                <h3 class="dtx-empty-state__title">Select a Project</h3>
+                <p class="dtx-empty-state__text">
+                    Choose a project from the dropdown to view its service graph.
+                </p>
+                {% else %}
+                <div class="dtx-empty-state__icon">&#x2699;</div>
+                <h3 class="dtx-empty-state__title">No Services</h3>
+                <p class="dtx-empty-state__text">
+                    Add services to see the dependency graph.
+                </p>
+                <code class="dtx-code-block mt-4">dtx add postgres --package postgresql</code>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </main>
+</div>
+
+{% if has_project %}
+<!-- Add Service Modal -->
+<div id="add-service-modal" class="dtx-modal-overlay hidden" onclick="this.classList.add('hidden')">
+    <div class="dtx-modal" style="width: 480px;" onclick="event.stopPropagation()">
+        <h2 class="dtx-modal__title font-mono mb-4">Add Service</h2>
+        <form hx-post="/htmx/services"
+              hx-swap="none"
+              hx-on::after-request="if(event.detail.successful) window.location.reload()">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <label class="block text-xs font-mono text-gray-400 mb-1">Name</label>
+                    <input type="text" name="name" required id="add-service-name"
+                           placeholder="e.g., postgres"
+                           style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
+                           onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                           onblur="this.style.borderColor='var(--dtx-border-subtle)'">
+                </div>
+                <div>
+                    <label class="block text-xs font-mono text-gray-400 mb-1">Command</label>
+                    <input type="text" name="command" required
+                           placeholder="e.g., postgres -D $PGDATA"
+                           style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
+                           onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                           onblur="this.style.borderColor='var(--dtx-border-subtle)'">
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div>
+                        <label class="block text-xs font-mono text-gray-400 mb-1">Package <span style="color: var(--dtx-text-muted);">(optional)</span></label>
+                        <input type="text" name="package"
+                               placeholder="e.g., postgresql"
+                               style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
+                               onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                               onblur="this.style.borderColor='var(--dtx-border-subtle)'">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-mono text-gray-400 mb-1">Port <span style="color: var(--dtx-text-muted);">(optional)</span></label>
+                        <input type="number" name="port"
+                               placeholder="e.g., 5432"
+                               style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
+                               onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                               onblur="this.style.borderColor='var(--dtx-border-subtle)'">
+                    </div>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 16px;">
+                <button type="button" onclick="closeAddServiceModal()"
+                        class="dtx-btn dtx-btn--ghost" style="flex: 1;">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="dtx-btn dtx-btn--primary" style="flex: 1;">
+                    Add Service
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Add Service modal
+function showAddServiceModal() {
+    const modal = document.getElementById('add-service-modal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        document.getElementById('add-service-name')?.focus();
+    }
+}
+function closeAddServiceModal() {
+    const modal = document.getElementById('add-service-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+// Bulk action state
+let servicesRunning = {{ running_count }} > 0;
+let bulkActionInFlight = false;
+
+function updateBulkActionButton() {
+    const btn = document.getElementById('bulk-action-btn');
+    const textEl = document.getElementById('bulk-action-text');
+    if (!btn || !textEl) return;
+
+    const runningCount = parseInt(document.getElementById('running-count')?.textContent || '0');
+    servicesRunning = runningCount > 0;
+
+    if (bulkActionInFlight) return; // Don't update while request is in-flight
+
+    if (servicesRunning) {
+        textEl.textContent = 'Stop All';
+        btn.className = 'dtx-btn dtx-btn--danger flex-1';
+    } else {
+        textEl.textContent = 'Start All';
+        btn.className = 'dtx-btn dtx-btn--success flex-1';
+    }
+    btn.disabled = false;
+}
+
+async function toggleBulkAction() {
+    if (bulkActionInFlight) return;
+
+    const btn = document.getElementById('bulk-action-btn');
+    const textEl = document.getElementById('bulk-action-text');
+    const spinner = document.getElementById('bulk-action-spinner');
+    if (!btn) return;
+
+    const endpoint = servicesRunning
+        ? `/api/stop`
+        : `/api/start`;
+    const wasRunning = servicesRunning;
+
+    // Disable + show spinner
+    bulkActionInFlight = true;
+    btn.disabled = true;
+    if (spinner) spinner.style.display = 'inline';
+
+    try {
+        const resp = await fetch(endpoint, { method: 'POST' });
+        const data = await resp.json();
+
+        if (data.success !== false) {
+            // Optimistic toggle
+            servicesRunning = !wasRunning;
+            if (textEl) textEl.textContent = servicesRunning ? 'Stop All' : 'Start All';
+            btn.className = servicesRunning
+                ? 'dtx-btn dtx-btn--danger flex-1'
+                : 'dtx-btn dtx-btn--success flex-1';
+        }
+    } catch (err) {
+        console.error('Bulk action failed:', err);
+    } finally {
+        bulkActionInFlight = false;
+        btn.disabled = false;
+        if (spinner) spinner.style.display = 'none';
+    }
+}
+
+// Update detail panel button based on service status
+function updateDetailPanelButton(servicesStarted) {
+    const detailPanel = document.getElementById('detail-panel');
+    if (!detailPanel || !detailPanel.innerHTML.trim()) return;
+
+    // Find the service name from data attribute or h2
+    const panelContent = detailPanel.querySelector('[data-service-name]');
+    let serviceName;
+    if (panelContent) {
+        serviceName = panelContent.dataset.serviceName;
+    } else {
+        const serviceNameEl = detailPanel.querySelector('h2');
+        if (!serviceNameEl) return;
+        serviceName = serviceNameEl.textContent.toLowerCase();
+    }
+
+    const status = window.serviceStates?.[serviceName] || 'stopped';
+
+    // Update the action button in footer
+    const footer = detailPanel.querySelector('.dtx-detail-panel__footer');
+    if (footer) {
+        const btn = footer.querySelector('button[hx-post]');
+        if (btn) {
+            const hxPost = btn.getAttribute('hx-post') || '';
+            if (status === 'running') {
+                btn.textContent = 'Stop Service';
+                btn.className = 'dtx-btn dtx-btn--danger flex-1';
+                if (hxPost.includes('/start')) {
+                    btn.setAttribute('hx-post', hxPost.replace('/start', '/stop'));
+                }
+            } else {
+                btn.textContent = 'Start Service';
+                btn.className = 'dtx-btn dtx-btn--success flex-1';
+                if (hxPost.includes('/stop')) {
+                    btn.setAttribute('hx-post', hxPost.replace('/stop', '/start'));
+                }
+            }
+            htmx.process(btn);
+        }
+    }
+
+    // Update status badge
+    const statusBadgeContainer = document.getElementById('detail-status-badge');
+    if (statusBadgeContainer) {
+        const badgeClass = `dtx-status-badge dtx-status-badge--${status}`;
+        statusBadgeContainer.innerHTML = `
+            <span class="${badgeClass}">
+                <span class="dtx-status-badge__indicator"></span>
+                ${status.toUpperCase()}
+            </span>
+        `;
+    }
+
+    // Update overview tab status field
+    const statusFields = detailPanel.querySelectorAll('.dtx-detail-panel__field-value');
+    statusFields.forEach(field => {
+        const label = field.previousElementSibling;
+        if (label && label.textContent === 'STATUS') {
+            field.textContent = status;
+        }
+    });
+}
+
+// Service filter
+let currentFilter = '';
+function filterServices(query) {
+    currentFilter = query.toLowerCase();
+    document.querySelectorAll('.dtx-activity-item').forEach(item => {
+        const name = item.querySelector('.dtx-activity-item__service span')?.textContent?.toLowerCase() || '';
+        const matches = name.includes(currentFilter) || !currentFilter;
+        item.style.opacity = matches ? '1' : '0.3';
+        item.style.pointerEvents = matches ? 'auto' : 'none';
+    });
+
+    // Filter graph nodes if graph exists
+    if (window.serviceGraph) {
+        window.serviceGraph.filter(query);
+    }
+}
+
+let filterMode = 'all';
+function setFilterMode(mode) {
+    filterMode = mode;
+    document.getElementById('filter-all').classList.toggle('dtx-signal-filter__toggle--active', mode === 'all');
+    document.getElementById('filter-deps').classList.toggle('dtx-signal-filter__toggle--active', mode === 'dependencies');
+
+    if (window.serviceGraph) {
+        window.serviceGraph.setMode(mode);
+    }
+}
+
+{% if has_project && has_services %}
+// Initialize D3 service graph
+(function initServiceGraph() {
+    const container = document.getElementById('graph-container');
+    const svg = d3.select('#service-graph');
+
+    // Service data - status will be set from window.serviceStates
+    const services = [
+        {% for service in services %}
+        {
+            id: "{{ service.name }}",
+            name: "{{ service.name }}",
+            status: window.serviceStates?.["{{ service.name }}"] || "stopped",
+            port: {% match service.port %}{% when Some with (port) %}{{ port }}{% when None %}null{% endmatch %},
+            package: {% match service.package %}{% when Some with (pkg) %}"{{ pkg }}"{% when None %}null{% endmatch %}
+        },
+        {% endfor %}
+    ];
+
+    // Dependencies
+    const links = [];
+    {% for service in services %}
+    {% match service.depends_on %}
+    {% when Some with (depends_on) %}
+    {% for dep in depends_on %}
+    {
+        // Find service by name
+        const source = services.find(s => s.name === "{{ dep.service }}");
+        if (source) {
+            links.push({ source: source.id, target: "{{ service.name }}" });
+        }
+    }
+    {% endfor %}
+    {% when None %}
+    {% endmatch %}
+    {% endfor %}
+
+    // Get dimensions
+    const width = container.clientWidth;
+    const height = container.clientHeight || 500;
+
+    svg.attr('viewBox', [0, 0, width, height]);
+
+    // Status colors
+    const statusColors = {
+        running: '#22c55e',
+        starting: '#f59e0b',
+        stopped: '#6b7280',
+        error: '#ec4899',
+        disabled: '#3d444d'
+    };
+
+    // Create force simulation
+    const simulation = d3.forceSimulation(services)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+        .force('charge', d3.forceManyBody().strength(-300))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(50));
+
+    // Draw links
+    const link = svg.append('g')
+        .attr('class', 'links')
+        .selectAll('line')
+        .data(links)
+        .join('line')
+        .attr('stroke', '#2d333b')
+        .attr('stroke-width', 2)
+        .attr('stroke-dasharray', '4,4');
+
+    // Draw nodes
+    const node = svg.append('g')
+        .attr('class', 'nodes')
+        .selectAll('g')
+        .data(services)
+        .join('g')
+        .attr('class', 'node')
+        .call(d3.drag()
+            .on('start', dragstarted)
+            .on('drag', dragged)
+            .on('end', dragended));
+
+    // Node circles
+    node.append('circle')
+        .attr('r', 30)
+        .attr('fill', '#161b22')
+        .attr('stroke', d => statusColors[d.status] || statusColors.stopped)
+        .attr('stroke-width', 2);
+
+    // Node labels
+    node.append('text')
+        .attr('dy', 4)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#e6edf3')
+        .attr('font-size', '10px')
+        .attr('font-family', 'JetBrains Mono, monospace')
+        .text(d => d.name.substring(0, 6).toUpperCase());
+
+    // Port labels
+    node.filter(d => d.port)
+        .append('text')
+        .attr('dy', 45)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#6b7280')
+        .attr('font-size', '9px')
+        .text(d => `:${d.port}`);
+
+    // Click handler
+    node.on('click', function(event, d) {
+        htmx.ajax('GET', `/htmx/services/${d.name}`, {target: '#detail-panel', swap: 'innerHTML'});
+        openDetailPanel();
+    });
+
+    // Simulation tick
+    simulation.on('tick', () => {
+        link
+            .attr('x1', d => d.source.x)
+            .attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x)
+            .attr('y2', d => d.target.y);
+
+        node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+
+    // Drag functions
+    function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+    }
+
+    // Update status from SSE
+    window.updateServiceStatus = function(serviceName, status) {
+        const service = services.find(s => s.name === serviceName);
+        if (service) {
+            service.status = status;
+            node.select('circle')
+                .filter(d => d.name === serviceName)
+                .attr('stroke', statusColors[status] || statusColors.stopped);
+        }
+
+        // Update counts
+        const running = services.filter(s => s.status === 'running').length;
+        const errors = services.filter(s => s.status === 'error').length;
+        document.getElementById('running-count').textContent = running;
+        document.getElementById('error-count').textContent = errors;
+    };
+
+    // Graph API
+    window.serviceGraph = {
+        filter: (query) => {
+            const q = query.toLowerCase();
+            node.style('opacity', d => d.name.toLowerCase().includes(q) || !q ? 1 : 0.2);
+        },
+        setMode: (mode) => {
+            // TODO: Implement dependency-only view
+        }
+    };
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+        const newWidth = container.clientWidth;
+        const newHeight = container.clientHeight || 500;
+        svg.attr('viewBox', [0, 0, newWidth, newHeight]);
+        simulation.force('center', d3.forceCenter(newWidth / 2, newHeight / 2));
+        simulation.alpha(0.3).restart();
+    });
+})();
+{% endif %}
+
+{% if has_project %}
+// Track global service states - initialized from server
+window.serviceStates = {{ service_statuses_json|safe }};
+window.previousRunningCount = {{ running_count }};
+
+// Apply initial status from server on load
+(function applyInitialStatus() {
+    // Update status dots based on initial state
+    document.querySelectorAll('.dtx-activity-item__status-dot').forEach(dot => {
+        const serviceName = dot.dataset.serviceName;
+        if (serviceName && window.serviceStates[serviceName]) {
+            dot.className = 'dtx-activity-item__status-dot dtx-activity-item__status-dot--' + window.serviceStates[serviceName];
+        }
+    });
+
+    // Update graph nodes if graph exists
+    setTimeout(() => {
+        if (window.updateServiceStatus) {
+            Object.entries(window.serviceStates).forEach(([name, status]) => {
+                window.updateServiceStatus(name, status);
+            });
+        }
+    }, 100);
+})();
+
+// Track all SSE connections for graceful shutdown
+window._sseConnections = [];
+
+// Handle server shutdown event - close all SSE connections gracefully
+function handleServerShutdown(source) {
+    console.log('Server shutdown detected, closing SSE connections...');
+    // Close all tracked SSE connections
+    window._sseConnections.forEach(conn => {
+        try { conn.close(); } catch(e) {}
+    });
+    window._sseConnections = [];
+    // Stop any log streams
+    if (window.terminalLogs) {
+        window.terminalLogs.stop();
+    }
+    // Show shutdown message in UI
+    const metaEl = document.querySelector('.dtx-header__meta');
+    if (metaEl) {
+        metaEl.innerHTML = 'SECTOR: LOCAL // STATUS: <span class="text-gray-500">SERVER SHUTDOWN</span>';
+    }
+}
+
+// Direct SSE connection for real-time status updates
+(function initSSE() {
+    const eventSource = new EventSource(`/sse/status`);
+    window._sseConnections.push(eventSource);
+
+    // Handle server shutdown
+    eventSource.addEventListener('shutdown', function(event) {
+        handleServerShutdown(eventSource);
+    });
+
+    eventSource.addEventListener('status', function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.services && Array.isArray(data.services)) {
+                let runningCount = 0;
+                let errorCount = 0;
+                let startingCount = 0;
+                let stoppedCount = 0;
+
+                data.services.forEach(svc => {
+                    const status = svc.status.toLowerCase();
+                    const prevStatus = window.serviceStates[svc.name];
+                    window.serviceStates[svc.name] = status;
+
+                    // Update graph node if exists
+                    if (window.updateServiceStatus) {
+                        window.updateServiceStatus(svc.name, status);
+                    }
+
+                    // Update sidebar status dot
+                    document.querySelectorAll('.dtx-activity-item').forEach(item => {
+                        const nameEl = item.querySelector('.dtx-activity-item__service span');
+                        if (nameEl && nameEl.textContent.trim() === svc.name) {
+                            const dot = item.querySelector('.dtx-activity-item__status-dot');
+                            if (dot) {
+                                dot.className = 'dtx-activity-item__status-dot dtx-activity-item__status-dot--' + status;
+                            }
+                        }
+                    });
+
+                    // Count statuses
+                    if (svc.is_running || status === 'running') runningCount++;
+                    if (status === 'starting') startingCount++;
+                    if (status === 'stopped') stoppedCount++;
+                    if (status === 'error') errorCount++;
+
+                    // Auto-show logs in detail panel when service starts running
+                    if (prevStatus && prevStatus !== 'running' && status === 'running') {
+                        const detailPanel = document.getElementById('detail-panel');
+                        if (detailPanel && detailPanel.innerHTML.includes(svc.name.toUpperCase())) {
+                            // Service just started and its detail panel is open - switch to logs
+                            if (typeof showDetailTab === 'function') {
+                                showDetailTab('logs');
+                                // Auto-start log stream
+                                setTimeout(() => {
+                                    if (typeof toggleLogStream === 'function') {
+                                        const toggleBtn = document.getElementById('log-stream-toggle');
+                                        if (toggleBtn && toggleBtn.textContent === 'Start Stream') {
+                                            toggleLogStream(svc.name);
+                                        }
+                                    }
+                                }, 100);
+                            }
+                        }
+                    }
+                });
+
+                // Update header stats
+                document.getElementById('running-count').textContent = runningCount;
+                document.getElementById('error-count').textContent = errorCount;
+
+                // Update meta line status
+                const metaStatus = runningCount > 0 ?
+                    `<span class="text-status-running">${runningCount} RUNNING</span>` :
+                    '<span class="text-gray-500">ALL STOPPED</span>';
+                const metaEl = document.querySelector('.dtx-header__meta');
+                if (metaEl) {
+                    metaEl.innerHTML = `SECTOR: LOCAL // STATUS: ${metaStatus} // <span id="header-uptime">UPTIME: ${document.getElementById('header-uptime')?.textContent?.replace('UPTIME: ', '') || '-'}</span>`;
+                }
+
+                // Update bulk action button
+                updateBulkActionButton();
+
+                // Update detail panel button if open
+                updateDetailPanelButton(runningCount > window.previousRunningCount);
+                window.previousRunningCount = runningCount;
+            }
+        } catch (e) {
+            console.warn('SSE parse error:', e);
+        }
+    });
+
+    eventSource.onerror = function() {
+        console.log('SSE connection error, reconnecting in 3s...');
+        eventSource.close();
+        // Remove from tracked connections
+        window._sseConnections = window._sseConnections.filter(c => c !== eventSource);
+        setTimeout(initSSE, 3000);
+    };
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => eventSource.close());
+
+    // Listen for config changes via EventBus (Unix socket → events_stream)
+    const eventsSource = new EventSource(`/sse/events`);
+    window._sseConnections.push(eventsSource);
+
+    // Handle server shutdown
+    eventsSource.addEventListener('shutdown', function(event) {
+        handleServerShutdown(eventsSource);
+    });
+
+    let configChangeTimer = null;
+
+    eventsSource.addEventListener('config_changed', function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('Config changed detected via EventBus:', data);
+
+            // Debounce 1s to coalesce rapid CLI changes
+            if (configChangeTimer) clearTimeout(configChangeTimer);
+            configChangeTimer = setTimeout(() => {
+                const metaEl = document.querySelector('.dtx-header__meta');
+                const isRunning = servicesRunning;
+
+                if (isRunning) {
+                    // Process-compose is running with stale config — restart it
+                    if (metaEl) {
+                        metaEl.innerHTML = 'SECTOR: LOCAL // STATUS: <span class="text-status-active">RESTARTING...</span>';
+                    }
+                    fetch(`/api/restart`, { method: 'POST' })
+                        .then(resp => {
+                            if (!resp.ok) throw new Error('Restart failed: ' + resp.status);
+                            return resp.json();
+                        })
+                        .then(() => {
+                            console.log('Restart completed, reloading page');
+                            window.location.reload();
+                        })
+                        .catch(err => {
+                            console.error('Auto-restart failed:', err);
+                            window.location.reload();
+                        });
+                } else {
+                    // Not running — just reload page to show updated services
+                    console.log('Config changed (not running), reloading page');
+                    window.location.reload();
+                }
+            }, 1000);
+        } catch (e) {
+            console.warn('config_changed parse error:', e);
+        }
+    });
+
+    eventsSource.onerror = function() {
+        console.log('Events SSE error, reconnecting in 5s...');
+        eventsSource.close();
+        // Remove from tracked connections
+        window._sseConnections = window._sseConnections.filter(c => c !== eventsSource);
+        // Reconnect handled by browser's built-in SSE reconnection
+    };
+
+    window.addEventListener('beforeunload', () => eventsSource.close());
+})();
+{% endif %}
+
+// Log viewer — auto-streams all service logs via SSE
+(function initLogViewer() {
+    const terminalOutput = document.getElementById('terminal-output');
+    const terminalStatus = document.getElementById('terminal-status');
+    if (!terminalOutput) return;
+
+    let currentLogSource = null;
+
+    function startLogStream(serviceName) {
+        stopLogStream();
+
+        const url = serviceName === 'all'
+            ? `/sse/logs`
+            : `/sse/logs/${serviceName}`;
+
+        currentLogSource = new EventSource(url);
+        window._sseConnections.push(currentLogSource);
+        if (terminalStatus) terminalStatus.textContent = 'STREAMING';
+
+        // Handle server shutdown
+        currentLogSource.addEventListener('shutdown', function(event) {
+            appendLog('warn', 'Server shutting down...');
+            handleServerShutdown(currentLogSource);
+        });
+
+        currentLogSource.addEventListener('log', function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                appendLog(data.level || 'info', `[${data.service}] ${data.message}`);
+            } catch (e) {
+                appendLog('info', event.data);
+            }
+        });
+
+        currentLogSource.addEventListener('info', function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                appendLog('info', data.message);
+            } catch (e) {
+                appendLog('info', event.data);
+            }
+        });
+
+        currentLogSource.onerror = function() {
+            if (terminalStatus) terminalStatus.textContent = 'DISCONNECTED';
+            stopLogStream();
+        };
+    }
+
+    function stopLogStream() {
+        if (currentLogSource) {
+            currentLogSource.close();
+            // Remove from tracked connections
+            window._sseConnections = window._sseConnections.filter(c => c !== currentLogSource);
+            currentLogSource = null;
+            window._terminalAutoStreaming = false;
+            if (terminalStatus) terminalStatus.textContent = 'IDLE';
+        }
+    }
+
+    function appendLog(level, message) {
+        const logDiv = document.createElement('div');
+        logDiv.className = 'dtx-terminal__log dtx-terminal__log--' + level;
+
+        const timestamp = new Date().toLocaleTimeString();
+        logDiv.innerHTML = `<span class="dtx-terminal__log-time">[${timestamp}]</span> ${escapeHtml(message)}`;
+
+        terminalOutput.appendChild(logDiv);
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Expose for base.html toggleTerminal auto-start
+    window.terminalLogs = { start: startLogStream, stop: stopLogStream };
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,33 @@
+# Ignore everything at root level
+/*
+
+# === Root files ===
+!.gitignore
+!.cursor/
+!.mcp.json
+!Cargo.toml
+!Cargo.lock
+!flake.nix
+!flake.lock
+!README.md
+!CLAUDE.md
+!AGENTS.md
+!tailwind.config.js
+
+# === Project directories ===
+!crates/
+!docs/
+!scripts/
+!static/
+
+# === Inside allowed dirs, ignore AI context files ===
+**/CLAUDE.md
+# Re-allow root CLAUDE.md (last match wins)
+!/CLAUDE.md
+
+# === Database artifacts (legacy) ===
+*.db
+
+# === ConfigStore temp/lock files ===
+*.yaml.lock
+*.yaml.tmp

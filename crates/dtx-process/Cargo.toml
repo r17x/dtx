@@ -1,0 +1,51 @@
+[package]
+name = "dtx-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Process resource implementation for dtx"
+
+[dependencies]
+# Core abstractions
+dtx-core = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "time", "net", "io-util", "sync"] }
+futures = { workspace = true }
+futures-lite = "2.3"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# HTTP probe (optional)
+reqwest = { workspace = true, optional = true }
+
+# Container runtime (optional)
+bollard = { workspace = true, optional = true }
+
+# Unix signals
+libc = { workspace = true }
+
+# Utilities
+dirs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+indexmap = { workspace = true }
+
+[features]
+default = ["http-probe"]
+http-probe = ["dep:reqwest"]
+container = ["dep:bollard"]

@@ -1,0 +1,37 @@
+<div id="add-result"></div>
+{% if packages.is_empty() %}
+<div class="text-center py-12 text-gray-500">
+    No packages found matching "{{ query }}"
+</div>
+{% else %}
+<div class="bg-white shadow overflow-hidden sm:rounded-md">
+    <ul class="divide-y divide-gray-200">
+        {% for pkg in packages %}
+        <li class="px-4 py-4 hover:bg-gray-50">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h3 class="text-sm font-medium text-gray-900">{{ pkg.pname }}</h3>
+                    <p class="text-sm text-gray-500">{{ pkg.description }}</p>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <span class="text-xs text-gray-400">{{ pkg.version }}</span>
+                    <form hx-post="/htmx/add-package" hx-target="#add-result" hx-swap="innerHTML" class="inline">
+                        <input type="hidden" name="package" value="{{ pkg.pname }}">
+                        <button type="submit" class="inline-flex items-center px-2.5 py-1 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700">
+                            Add
+                        </button>
+                    </form>
+                    <button onclick="navigator.clipboard.writeText('{{ pkg.pname }}')"
+                            class="text-indigo-600 hover:text-indigo-800 text-sm">
+                        Copy
+                    </button>
+                </div>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+<p class="mt-4 text-sm text-gray-500 text-center">
+    Found {{ packages.len() }} packages matching "{{ query }}"
+</p>
+{% endif %}

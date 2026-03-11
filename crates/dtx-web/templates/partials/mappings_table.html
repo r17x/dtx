@@ -1,0 +1,55 @@
+{% for pkg in packages %}
+<tr class="hover:bg-dtx-elevated/30">
+    <td class="py-3 font-mono text-white">{{ pkg.service_name }}</td>
+    <td class="py-3 font-mono text-gray-300 max-w-xs truncate" title="{{ pkg.command }}">{{ pkg.command }}</td>
+    <td class="py-3">
+        <span class="dtx-tag dtx-tag--sm {{ pkg.status_class }}">
+            {{ pkg.status }}
+        </span>
+    </td>
+    <td class="py-3 font-mono">
+        {% match pkg.package %}
+            {% when Some with (p) %}
+                <span class="text-status-active">{{ p }}</span>
+            {% when None %}
+                {% match pkg.executable %}
+                    {% when Some with (e) %}
+                        <span class="text-gray-500 italic">{{ e }}</span>
+                    {% when None %}
+                        <span class="text-gray-500">-</span>
+                {% endmatch %}
+        {% endmatch %}
+    </td>
+    <td class="py-3">
+        {% if pkg.status == "Needs Attention" %}
+        <div class="flex gap-2">
+            <button onclick="showAddMappingModal('{{ pkg.mapping_key }}')"
+                    class="text-xs text-status-active hover:underline">
+                Add Mapping
+            </button>
+            <button hx-post="/htmx/mark-local/{{ pkg.mapping_key }}"
+                    hx-target="#packages-tbody"
+                    hx-swap="innerHTML"
+                    class="text-xs text-gray-400 hover:text-white">
+                Mark Local
+            </button>
+            <button hx-post="/htmx/mark-ignore/{{ pkg.mapping_key }}"
+                    hx-target="#packages-tbody"
+                    hx-swap="innerHTML"
+                    class="text-xs text-gray-400 hover:text-white">
+                Ignore
+            </button>
+        </div>
+        {% else %}
+        <span class="text-gray-500 text-xs">-</span>
+        {% endif %}
+    </td>
+</tr>
+{% endfor %}
+{% if packages.is_empty() %}
+<tr>
+    <td colspan="5" class="py-8 text-center text-gray-500">
+        No services configured yet. Add services to analyze package mappings.
+    </td>
+</tr>
+{% endif %}

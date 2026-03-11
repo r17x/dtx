@@ -1,0 +1,30 @@
+[package]
+name = "dtx-middleware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Middleware implementations for dtx"
+
+[dependencies]
+dtx-core = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+rand = "0.8"
+
+# AI provider support (optional)
+reqwest = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+ai = ["dep:reqwest"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true }

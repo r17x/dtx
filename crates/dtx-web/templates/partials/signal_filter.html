@@ -1,0 +1,86 @@
+{# Signal Filter Component #}
+{# Floating filter panel for the service graph #}
+
+<div id="signal-filter" class="dtx-signal-filter">
+    <!-- Context Label -->
+    <div class="dtx-signal-filter__label">
+        <span class="dtx-signal-filter__badge">
+            {% if !current_context.is_empty() %}{{ current_context }}{% else %}All Services{% endif %}
+        </span>
+    </div>
+
+    <!-- Search Input -->
+    <div class="dtx-signal-filter__search">
+        <div class="dtx-signal-filter__search-input">
+            <span class="text-gray-500">&#x25CF;</span>
+            <input type="text"
+                   id="filter-search"
+                   placeholder="Search in nodes..."
+                   oninput="filterNodes(this.value)"
+                   autocomplete="off">
+        </div>
+    </div>
+
+    <!-- Toggle Buttons -->
+    <div class="dtx-signal-filter__toggles">
+        <button id="filter-all"
+                class="dtx-signal-filter__toggle dtx-signal-filter__toggle--active"
+                onclick="setFilterMode('all')">
+            All Services
+        </button>
+        <button id="filter-deps"
+                class="dtx-signal-filter__toggle"
+                onclick="setFilterMode('dependencies')">
+            Dependencies
+        </button>
+    </div>
+</div>
+
+<script>
+let currentFilterMode = 'all';
+let filterQuery = '';
+
+function filterNodes(query) {
+    filterQuery = query.toLowerCase();
+
+    // Filter D3 graph nodes
+    if (window.serviceGraph) {
+        window.serviceGraph.filter(query);
+    }
+
+    // Update activity feed items visibility
+    document.querySelectorAll('.dtx-activity-item').forEach(item => {
+        const serviceName = item.querySelector('.dtx-activity-item__service')?.textContent?.toLowerCase() || '';
+        const matches = serviceName.includes(filterQuery) || !filterQuery;
+        item.style.opacity = matches ? '1' : '0.3';
+    });
+}
+
+function setFilterMode(mode) {
+    currentFilterMode = mode;
+
+    // Update button styles
+    const allBtn = document.getElementById('filter-all');
+    const depsBtn = document.getElementById('filter-deps');
+
+    if (mode === 'all') {
+        allBtn.classList.add('dtx-signal-filter__toggle--active');
+        depsBtn.classList.remove('dtx-signal-filter__toggle--active');
+    } else {
+        depsBtn.classList.add('dtx-signal-filter__toggle--active');
+        allBtn.classList.remove('dtx-signal-filter__toggle--active');
+    }
+
+    // Update D3 graph mode
+    if (window.serviceGraph) {
+        window.serviceGraph.setMode(mode);
+    }
+}
+
+// Re-apply filter after SSE updates
+document.body.addEventListener('htmx:sseMessage', () => {
+    if (filterQuery) {
+        filterNodes(filterQuery);
+    }
+});
+</script>

@@ -1,0 +1,66 @@
+{# Activity Feed Component - Phase 5.1 UI Redesign #}
+{# Usage: Include this partial in the main dashboard layout #}
+{# Expected variables: events (Vec<ActivityEvent>), project (Project) #}
+
+<aside class="dtx-activity-feed">
+  <!-- Header -->
+  <header class="dtx-activity-feed__header">
+    <h2 class="dtx-activity-feed__title">
+      <span class="dtx-activity-feed__title-icon">&#x2699;</span>
+      ACTIVITY FEED
+    </h2>
+    <span class="dtx-activity-feed__count">{{ events.len() }}</span>
+  </header>
+
+  <!-- Events List (SSE updated) -->
+  <div class="dtx-activity-feed__list"
+       hx-ext="sse"
+       sse-connect="/sse/events"
+       sse-swap="event"
+       hx-swap="afterbegin">
+
+    {% if events.is_empty() %}
+    <div class="px-4 py-8 text-center dtx-text-muted">
+      <p>No recent activity</p>
+      <p class="text-xs mt-2">Events will appear here in real-time</p>
+    </div>
+    {% else %}
+      {% for event in events %}
+      <button class="dtx-activity-item"
+              hx-get="/htmx/services/{{ event.service_name }}"
+              hx-target="#detail-panel"
+              hx-swap="innerHTML"
+              onclick="openDetailPanel()">
+
+        <div class="dtx-activity-item__header">
+          <div class="dtx-activity-item__service">
+            <!-- Service name with cyan accent -->
+            <span>{{ event.service_name }}</span>
+
+            <!-- Status indicator dot -->
+            <span class="dtx-activity-item__status-dot dtx-activity-item__status-dot--{{ event.status }}"></span>
+          </div>
+
+          <!-- Timestamp -->
+          <time class="dtx-activity-item__time">{{ event.time_ago }}</time>
+        </div>
+
+        <!-- Event message -->
+        <p class="dtx-activity-item__message">{{ event.message }}</p>
+      </button>
+      {% endfor %}
+    {% endif %}
+  </div>
+</aside>
+
+<script>
+// Global function to open detail panel (called by HTMX onclick)
+function openDetailPanel() {
+  const panel = document.getElementById('detail-panel-container');
+  if (panel) {
+    panel.dataset.open = 'true';
+    panel.classList.remove('translate-x-full');
+    panel.classList.add('translate-x-0');
+  }
+}
+</script>

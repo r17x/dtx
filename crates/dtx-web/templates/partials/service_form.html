@@ -1,0 +1,45 @@
+<div class="px-4 py-4 bg-gray-50">
+    <h3 class="text-sm font-medium text-gray-900 mb-3">Add New Service</h3>
+    <form hx-post="/htmx/services"
+          hx-target="#services-list"
+          hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful) { window.location.reload(); }">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-xs font-medium text-gray-700">Name</label>
+                <input type="text" name="name" required
+                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                       placeholder="e.g., postgres">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700">Command</label>
+                <input type="text" name="command" required
+                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                       placeholder="e.g., postgres -D $PGDATA">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700">Package (optional)</label>
+                <input type="text" name="package"
+                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                       placeholder="e.g., postgresql">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700">Port (optional)</label>
+                <input type="number" name="port"
+                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                       placeholder="e.g., 5432">
+            </div>
+        </div>
+        <div class="mt-4 flex justify-end space-x-2">
+            <button type="button" 
+                    onclick="this.closest('#service-form-container').innerHTML = ''"
+                    class="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50">
+                Cancel
+            </button>
+            <button type="submit"
+                    class="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700">
+                Add Service
+            </button>
+        </div>
+    </form>
+</div>

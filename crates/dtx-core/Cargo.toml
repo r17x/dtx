@@ -1,0 +1,52 @@
+[package]
+name = "dtx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core engine for dtx - YAML generation and process-compose client"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+indexmap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# Unix socket HTTP client
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+tower-service = { workspace = true }
+
+# Nix AST parsing
+rnix = { workspace = true }
+rowan = { workspace = true }
+async-trait = { workspace = true }
+
+# Native Nix bindings (FFI to Nix C API) - from nixops4/nix-bindings-rust
+nix-bindings-util = { workspace = true, optional = true }
+nix-bindings-store = { workspace = true, optional = true }
+nix-bindings-expr = { workspace = true, optional = true }
+nix-bindings-fetchers = { workspace = true, optional = true }
+nix-bindings-flake = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+native-nix = ["nix-bindings-util", "nix-bindings-store", "nix-bindings-expr", "nix-bindings-fetchers", "nix-bindings-flake"]

@@ -1,0 +1,44 @@
+[package]
+name = "dtx-vm"
+version.workspace = true
+edition.workspace = true
+description = "VM backend for dtx - QEMU, Firecracker, and NixOS VM support"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+dtx-core = { workspace = true }
+
+# Async runtime
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "time", "net", "io-util", "fs", "sync"] }
+tokio-stream = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Utilities
+which = "7"
+rand = "0.8"
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["qemu", "firecracker", "nixos"]
+qemu = []
+firecracker = []
+nixos = []

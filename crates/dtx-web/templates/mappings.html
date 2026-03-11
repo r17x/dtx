@@ -1,0 +1,506 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} - Package Mappings{% endblock %}
+
+{% block header_stats %}
+<div class="dtx-header__stats">
+    <div class="dtx-header__stat">
+        <span class="dtx-header__stat-value text-gray-300">{{ packages.len() }}</span>
+        <span class="dtx-header__stat-label">Packages</span>
+    </div>
+    <div class="dtx-header__stat">
+        <span class="dtx-header__stat-value text-status-running">{{ packages.len() - needs_attention_count }}</span>
+        <span class="dtx-header__stat-label">Resolved</span>
+    </div>
+    <div class="dtx-header__stat">
+        <span class="dtx-header__stat-value {% if needs_attention_count > 0 %}text-status-error{% else %}text-gray-500{% endif %}">{{ needs_attention_count }}</span>
+        <span class="dtx-header__stat-label">Needs Attention</span>
+    </div>
+</div>
+{% endblock %}
+
+{% block header_actions %}
+<!-- Back to Project -->
+<a href="/" class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+    <span>&larr;</span>
+    <span>Back to {{ project.name }}</span>
+</a>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto p-6 space-y-6">
+    <!-- Page Header -->
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-white">Package Mappings</h1>
+            <p class="text-gray-400 mt-1">Configure how commands map to Nix packages for {{ project.name }}</p>
+        </div>
+        {% if needs_attention_count > 0 %}
+        <div class="dtx-card bg-status-error/10 border-status-error/30 px-4 py-2">
+            <span class="text-status-error font-mono">{{ needs_attention_count }} command(s) need attention</span>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Package Analysis Table -->
+    <div class="dtx-card">
+        <header class="dtx-card__header border-b border-dtx-border pb-4 mb-4">
+            <h2 class="dtx-card__title flex items-center gap-2">
+                <span class="text-status-active">&#x25C9;</span>
+                Service Package Analysis
+            </h2>
+            <p class="text-sm text-gray-500 mt-1">Auto-detected and explicit package assignments</p>
+        </header>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-left text-gray-400 border-b border-dtx-border">
+                        <th class="pb-3 font-medium">Service</th>
+                        <th class="pb-3 font-medium">Command</th>
+                        <th class="pb-3 font-medium">Status</th>
+                        <th class="pb-3 font-medium">Package</th>
+                        <th class="pb-3 font-medium">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="packages-tbody" class="divide-y divide-dtx-border">
+                    {% for pkg in packages %}
+                    <tr class="hover:bg-dtx-elevated/30">
+                        <td class="py-3 font-mono text-white">{{ pkg.service_name }}</td>
+                        <td class="py-3 font-mono text-gray-300 max-w-xs truncate" title="{{ pkg.command }}">{{ pkg.command }}</td>
+                        <td class="py-3">
+                            <span class="dtx-tag dtx-tag--sm {{ pkg.status_class }}">
+                                {{ pkg.status }}
+                            </span>
+                        </td>
+                        <td class="py-3 font-mono">
+                            {% match pkg.package %}
+                                {% when Some with (p) %}
+                                    <span class="text-status-active">{{ p }}</span>
+                                {% when None %}
+                                    {% match pkg.executable %}
+                                        {% when Some with (e) %}
+                                            <span class="text-gray-500 italic">{{ e }}</span>
+                                        {% when None %}
+                                            <span class="text-gray-500">-</span>
+                                    {% endmatch %}
+                            {% endmatch %}
+                        </td>
+                        <td class="py-3">
+                            {% if pkg.status == "Needs Attention" %}
+                            <div class="flex gap-2">
+                                <button onclick="showAddMappingModal('{{ pkg.mapping_key }}')"
+                                        class="text-xs text-status-active hover:underline">
+                                    Add Mapping
+                                </button>
+                                <button hx-post="/htmx/mark-local/{{ pkg.mapping_key }}"
+                                        hx-target="#packages-tbody"
+                                        hx-swap="innerHTML"
+                                        class="text-xs text-gray-400 hover:text-white">
+                                    Mark Local
+                                </button>
+                                <button hx-post="/htmx/mark-ignore/{{ pkg.mapping_key }}"
+                                        hx-target="#packages-tbody"
+                                        hx-swap="innerHTML"
+                                        class="text-xs text-gray-400 hover:text-white">
+                                    Ignore
+                                </button>
+                            </div>
+                            {% else %}
+                            <span class="text-gray-500 text-xs">-</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if packages.is_empty() %}
+                    <tr>
+                        <td colspan="5" class="py-8 text-center text-gray-500">
+                            No services configured yet. Add services to analyze package mappings.
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Custom Mappings Section -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Custom Mappings -->
+        <div class="dtx-card">
+            <header class="dtx-card__header border-b border-dtx-border pb-4 mb-4">
+                <h2 class="dtx-card__title flex items-center gap-2">
+                    <span class="text-status-ephemeral">&#x2699;</span>
+                    Custom Mappings
+                </h2>
+                <p class="text-sm text-gray-500 mt-1">Command → Nix package overrides</p>
+            </header>
+
+            <!-- Add Mapping Form -->
+            <form hx-post="/htmx/mappings"
+                  hx-target="#custom-mappings-list"
+                  hx-swap="innerHTML"
+                  hx-on::after-request="this.reset()"
+                  class="flex gap-2 mb-4">
+                <input type="text" name="command" placeholder="Command (e.g., node)"
+                       class="dtx-input flex-1 text-sm" required>
+                <input type="text" name="package" placeholder="Package (e.g., nodejs)"
+                       class="dtx-input flex-1 text-sm" required>
+                <button type="submit" class="dtx-btn dtx-btn--primary dtx-btn--sm">Add</button>
+            </form>
+
+            <div id="custom-mappings-list" class="space-y-2 max-h-64 overflow-y-auto">
+                {% for mapping in custom_mappings %}
+                <div class="flex items-center justify-between bg-dtx-elevated/50 rounded px-3 py-2">
+                    <div class="flex items-center gap-2 font-mono text-sm">
+                        <span class="text-gray-300">{{ mapping.0 }}</span>
+                        <span class="text-gray-500">&rarr;</span>
+                        <span class="text-status-active">{{ mapping.1 }}</span>
+                    </div>
+                    <button hx-delete="/htmx/mappings/{{ mapping.0 }}"
+                            hx-target="#custom-mappings-list"
+                            hx-swap="innerHTML"
+                            class="text-gray-400 hover:text-status-error text-sm">
+                        &times;
+                    </button>
+                </div>
+                {% endfor %}
+                {% if custom_mappings.is_empty() %}
+                <p class="text-gray-500 text-sm text-center py-4">No custom mappings defined</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Local Binaries & Ignored -->
+        <div class="space-y-6">
+            <!-- Local Binaries -->
+            <div class="dtx-card">
+                <header class="dtx-card__header border-b border-dtx-border pb-3 mb-3">
+                    <h2 class="dtx-card__title flex items-center gap-2 text-sm">
+                        <span class="text-status-starting">&#x25B6;</span>
+                        Local Binaries
+                    </h2>
+                    <p class="text-xs text-gray-500 mt-1">Commands that don't need Nix packages</p>
+                </header>
+                <div id="local-binaries-list" class="flex flex-wrap gap-2">
+                    {% for binary in local_binaries %}
+                    <span class="dtx-tag dtx-tag--sm bg-status-starting/20 text-status-starting border-status-starting/30">
+                        {{ binary }}
+                    </span>
+                    {% endfor %}
+                    {% if local_binaries.is_empty() %}
+                    <p class="text-gray-500 text-xs">None configured</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Ignored Commands -->
+            <div class="dtx-card">
+                <header class="dtx-card__header border-b border-dtx-border pb-3 mb-3">
+                    <h2 class="dtx-card__title flex items-center gap-2 text-sm">
+                        <span class="text-gray-500">&#x2717;</span>
+                        Ignored Commands
+                    </h2>
+                    <p class="text-xs text-gray-500 mt-1">Commands excluded from package analysis</p>
+                </header>
+                <div id="ignored-commands-list" class="flex flex-wrap gap-2">
+                    {% for cmd in ignored_commands %}
+                    <span class="dtx-tag dtx-tag--sm bg-gray-500/20 text-gray-400 border-gray-500/30">
+                        {{ cmd }}
+                    </span>
+                    {% endfor %}
+                    {% if ignored_commands.is_empty() %}
+                    <p class="text-gray-500 text-xs">None configured</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Files -->
+    <div class="dtx-card bg-dtx-elevated/30">
+        <div class="flex items-start gap-4">
+            <span class="text-2xl text-gray-500">&#x1F4C4;</span>
+            <div class="flex-1">
+                <h3 class="font-semibold text-white">Configuration Files</h3>
+                <p class="text-sm text-gray-400 mt-1">
+                    Edit project configuration directly in the browser
+                </p>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button onclick="openFileEditorModal('config')"
+                            class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                        config.toml
+                    </button>
+                    <button onclick="openFileEditorModal('mappings')"
+                            class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                        mappings.toml
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- File Editor Modal -->
+<div id="file-editor-modal" class="dtx-modal-overlay hidden" onclick="closeFileEditorModal()">
+    <div class="dtx-modal" style="width: 640px; max-height: 85vh; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+            <h2 class="dtx-modal__title" style="margin-bottom: 0;">
+                <span id="file-editor-title" class="font-mono"></span>
+            </h2>
+            <span id="file-editor-status" style="font-size: 0.75rem; padding: 2px 8px; border-radius: 4px;"></span>
+        </div>
+        <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+            <textarea id="file-editor-textarea"
+                      spellcheck="false"
+                      style="flex: 1; min-height: 320px; width: 100%; padding: 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.8125rem; line-height: 1.5; resize: vertical; outline: none;"
+                      onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                      onblur="this.style.borderColor='var(--dtx-border-subtle)'"
+            ></textarea>
+            <div id="file-editor-error"
+                 style="margin-top: 8px; font-size: 0.75rem; font-family: var(--dtx-font-mono); color: var(--dtx-pink); display: none;"></div>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 16px;">
+            <button type="button" onclick="closeFileEditorModal()"
+                    class="dtx-btn dtx-btn--ghost" style="flex: 1;">
+                Cancel
+            </button>
+            <button type="button" id="file-editor-save-btn" onclick="saveFileEditor()" disabled
+                    class="dtx-btn dtx-btn--primary" style="flex: 1;">
+                Save
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Mapping Modal -->
+<div id="add-mapping-modal" class="dtx-modal-overlay hidden" onclick="this.classList.add('hidden')">
+    <div class="dtx-modal" onclick="event.stopPropagation()">
+        <h2 class="dtx-modal__title font-mono mb-4">Add Package Mapping</h2>
+        <form hx-post="/htmx/mappings"
+              hx-target="#packages-tbody"
+              hx-swap="innerHTML"
+              hx-on::after-request="closeAddMappingModal()">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Command</label>
+                    <input type="text" name="command" id="modal-command-input"
+                           class="dtx-input w-full" required>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Nix Package</label>
+                    <input type="text" name="package" id="modal-package-input"
+                           class="dtx-input w-full" placeholder="e.g., nodejs, python3" required>
+                </div>
+            </div>
+            <div class="flex gap-2 mt-6">
+                <button type="button" onclick="closeAddMappingModal()"
+                        class="dtx-btn dtx-btn--ghost flex-1">
+                    Cancel
+                </button>
+                <button type="submit" class="dtx-btn dtx-btn--primary flex-1">
+                    Add Mapping
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+/* Status classes for package analysis */
+.status--explicit {
+    background: rgba(34, 211, 238, 0.15);
+    color: #22d3ee;
+    border-color: rgba(34, 211, 238, 0.3);
+}
+
+.status--auto {
+    background: rgba(34, 197, 94, 0.15);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.status--local {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.3);
+}
+
+.status--warning {
+    background: rgba(236, 72, 153, 0.15);
+    color: #ec4899;
+    border-color: rgba(236, 72, 153, 0.3);
+}
+</style>
+
+<script>
+function showAddMappingModal(command) {
+    const modal = document.getElementById('add-mapping-modal');
+    const input = document.getElementById('modal-command-input');
+    modal.classList.remove('hidden');
+    input.value = command || '';
+    document.getElementById('modal-package-input').focus();
+}
+
+function closeAddMappingModal() {
+    document.getElementById('add-mapping-modal').classList.add('hidden');
+}
+
+// === File Editor Modal ===
+
+const FILE_LABELS = {
+    config: '.dtx/config.toml',
+    mappings: '.dtx/mappings.toml',
+    flake: 'flake.nix',
+};
+
+let fileEditorState = null;
+let fileDebounceTimer = null;
+
+function showNotification(message, type) {
+    const notification = document.createElement('div');
+    notification.className = `fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg font-mono text-sm z-50 ${
+        type === 'success'
+            ? 'bg-status-running/20 text-status-running border border-status-running/30'
+            : 'bg-status-error/20 text-status-error border border-status-error/30'
+    }`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 3000);
+}
+
+async function openFileEditorModal(fileType) {
+    const modal = document.getElementById('file-editor-modal');
+    const title = document.getElementById('file-editor-title');
+    const textarea = document.getElementById('file-editor-textarea');
+    const statusEl = document.getElementById('file-editor-status');
+    const saveBtn = document.getElementById('file-editor-save-btn');
+    const errorEl = document.getElementById('file-editor-error');
+
+    title.textContent = FILE_LABELS[fileType] || fileType;
+    textarea.value = 'Loading...';
+    textarea.disabled = true;
+    statusEl.textContent = '';
+    statusEl.style.cssText = '';
+    saveBtn.disabled = true;
+    errorEl.style.display = 'none';
+    modal.classList.remove('hidden');
+
+    try {
+        const response = await fetch(`/api/files/${fileType}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+
+        textarea.value = data.content;
+        textarea.disabled = false;
+        fileEditorState = {
+            fileType,
+            originalContent: data.content,
+        };
+
+        // Debounced validation on input
+        textarea.oninput = () => {
+            clearTimeout(fileDebounceTimer);
+            fileDebounceTimer = setTimeout(() => runValidation(), 500);
+        };
+
+        // Initial validation
+        runValidation();
+        textarea.focus();
+    } catch (error) {
+        showNotification(`Failed to load file: ${error.message}`, 'error');
+        modal.classList.add('hidden');
+    }
+}
+
+async function runValidation() {
+    if (!fileEditorState) return;
+
+    const textarea = document.getElementById('file-editor-textarea');
+    const statusEl = document.getElementById('file-editor-status');
+    const saveBtn = document.getElementById('file-editor-save-btn');
+    const errorEl = document.getElementById('file-editor-error');
+    const content = textarea.value;
+
+    try {
+        const response = await fetch(
+            `/api/files/${fileEditorState.fileType}/validate`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            }
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+
+        if (result.valid) {
+            statusEl.textContent = 'Valid';
+            statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(34,197,94,0.15); color:#22c55e;';
+            saveBtn.disabled = false;
+            errorEl.style.display = 'none';
+        } else {
+            statusEl.textContent = 'Invalid';
+            statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(236,72,153,0.15); color:#ec4899;';
+            saveBtn.disabled = true;
+            errorEl.textContent = result.error || 'Validation failed';
+            errorEl.style.display = 'block';
+        }
+    } catch (error) {
+        statusEl.textContent = 'Error';
+        statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(236,72,153,0.15); color:#ec4899;';
+        saveBtn.disabled = true;
+        errorEl.textContent = error.message;
+        errorEl.style.display = 'block';
+    }
+}
+
+async function saveFileEditor() {
+    if (!fileEditorState) return;
+
+    const textarea = document.getElementById('file-editor-textarea');
+    const saveBtn = document.getElementById('file-editor-save-btn');
+    const content = textarea.value;
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+        const response = await fetch(
+            `/api/files/${fileEditorState.fileType}`,
+            {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            }
+        );
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+
+        showNotification(`${FILE_LABELS[fileEditorState.fileType]} saved`, 'success');
+        closeFileEditorModal();
+    } catch (error) {
+        showNotification(`Failed to save: ${error.message}`, 'error');
+        saveBtn.disabled = false;
+    } finally {
+        saveBtn.textContent = 'Save';
+    }
+}
+
+function closeFileEditorModal() {
+    clearTimeout(fileDebounceTimer);
+    document.getElementById('file-editor-modal').classList.add('hidden');
+    fileEditorState = null;
+}
+
+// Close modals on escape
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeAddMappingModal();
+        closeFileEditorModal();
+    }
+});
+</script>
+{% endblock %}

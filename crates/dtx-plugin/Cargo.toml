@@ -1,0 +1,37 @@
+[package]
+name = "dtx-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Plugin system for dtx - dynamic loading of backends, middleware, and translators"
+
+[dependencies]
+dtx-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
+
+# Dynamic loading (optional)
+libloading = { workspace = true, optional = true }
+
+# WASM sandbox (optional)
+wasmtime = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
+[features]
+default = []
+dynamic = ["dep:libloading"]
+sandbox = ["dep:wasmtime", "dep:ed25519-dalek", "dep:sha2"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true }
+rand = "0.8"
+wat = "1"

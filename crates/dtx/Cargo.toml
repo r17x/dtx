@@ -1,0 +1,39 @@
+[package]
+name = "dtx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Dev Tools eXperience - CLI for process orchestration with Nix"
+
+[[bin]]
+name = "dtx"
+path = "src/main.rs"
+
+[dependencies]
+dtx-core = { workspace = true }
+dtx-process = { workspace = true }
+dtx-web = { workspace = true }
+dtx-protocol = { workspace = true }
+indexmap = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

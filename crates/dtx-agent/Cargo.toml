@@ -1,0 +1,50 @@
+[package]
+name = "dtx-agent"
+version.workspace = true
+edition.workspace = true
+description = "AI agent backend for dtx - provides Claude, OpenAI, and Ollama support"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+dtx-core = { workspace = true }
+dtx-plugin = { workspace = true }
+
+# Async runtime
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "time", "fs", "sync"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true, features = ["json", "stream"] }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Date/time
+chrono = { workspace = true }
+
+# Utilities
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = ["claude", "ollama"]
+claude = []
+openai = []
+ollama = []
+llamacpp = []
+mcp = []

@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}Projects - dtx{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto px-4 py-8">
+    <!-- Page Header -->
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-2xl font-bold">Projects</h1>
+            <p class="text-gray-500 text-sm mt-1">Manage your development projects and services</p>
+        </div>
+        <button onclick="document.getElementById('new-project-modal').classList.remove('hidden')"
+                class="dtx-btn dtx-btn--primary">
+            New Project
+        </button>
+    </div>
+
+    <!-- Projects List -->
+    <div id="projects-list">
+        {% if projects.is_empty() %}
+        <div class="dtx-panel">
+            <div class="text-center py-12">
+                <div class="w-16 h-16 rounded-full bg-dtx-card mx-auto flex items-center justify-center mb-4">
+                    <span class="text-3xl text-gray-500">&#x25C6;</span>
+                </div>
+                <h3 class="text-lg font-medium mb-2">No projects yet</h3>
+                <p class="text-gray-500 mb-4">Create your first project to get started</p>
+                <button onclick="document.getElementById('new-project-modal').classList.remove('hidden')"
+                        class="dtx-btn dtx-btn--primary">
+                    Create Project
+                </button>
+            </div>
+        </div>
+        {% else %}
+        <div class="grid gap-4">
+            {% for project in projects %}
+            <a href="/" class="dtx-card block group">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-4">
+                        <div class="w-12 h-12 rounded-lg bg-status-active/20 flex items-center justify-center">
+                            <span class="text-status-active text-xl">&#x25C6;</span>
+                        </div>
+                        <div>
+                            <h3 class="font-semibold group-hover:text-status-active transition-colors">
+                                {{ project.name }}
+                            </h3>
+                            <p class="text-sm text-gray-500">{{ project.path }}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-6">
+                        {% if project.description.is_some() %}
+                        <p class="text-sm text-gray-400 max-w-xs truncate hidden md:block">
+                            {{ project.description.as_ref().unwrap() }}
+                        </p>
+                        {% endif %}
+                        <div class="text-right">
+                            <span class="dtx-status-badge dtx-status-badge--active">Active</span>
+                            <p class="text-xs text-gray-500 mt-1">Created {{ project.created_at }}</p>
+                        </div>
+                        <span class="text-gray-500 group-hover:text-status-active transition-colors">
+                            &rarr;
+                        </span>
+                    </div>
+                </div>
+            </a>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- New Project Modal -->
+<div id="new-project-modal" class="dtx-modal-overlay hidden" onclick="this.classList.add('hidden')">
+    <div class="dtx-modal" onclick="event.stopPropagation()">
+        <h2 class="dtx-modal__title">Create New Project</h2>
+
+        <form hx-post="/api/project/init-cwd"
+              hx-target="#projects-list"
+              hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful) { document.getElementById('new-project-modal').classList.add('hidden'); this.reset(); }">
+
+            <div class="mb-4">
+                <label class="block text-sm text-gray-400 mb-2">Project Name</label>
+                <input type="text"
+                       name="name"
+                       required
+                       placeholder="my-project"
+                       class="w-full px-3 py-2 bg-dtx-card border border-dtx-border rounded-md
+                              focus:outline-none focus:border-status-active
+                              placeholder-gray-600">
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-sm text-gray-400 mb-2">Project Path</label>
+                <input type="text"
+                       name="path"
+                       required
+                       placeholder="/path/to/project"
+                       class="w-full px-3 py-2 bg-dtx-card border border-dtx-border rounded-md
+                              focus:outline-none focus:border-status-active
+                              placeholder-gray-600">
+            </div>
+
+            <div class="mb-6">
+                <label class="block text-sm text-gray-400 mb-2">Description (optional)</label>
+                <textarea name="description"
+                          rows="3"
+                          placeholder="Brief description of your project"
+                          class="w-full px-3 py-2 bg-dtx-card border border-dtx-border rounded-md
+                                 focus:outline-none focus:border-status-active
+                                 placeholder-gray-600 resize-none"></textarea>
+            </div>
+
+            <div class="flex gap-3">
+                <button type="button"
+                        onclick="document.getElementById('new-project-modal').classList.add('hidden')"
+                        class="dtx-btn dtx-btn--ghost flex-1">
+                    Cancel
+                </button>
+                <button type="submit" class="dtx-btn dtx-btn--primary flex-1">
+                    Create Project
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

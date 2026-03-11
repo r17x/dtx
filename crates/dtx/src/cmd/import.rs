@@ -1,0 +1,355 @@
+//! Import configuration from external formats.
+
+use crate::context::Context;
+use crate::output::Output;
+use anyhow::{bail, Result};
+use dtx_core::config::schema::{
+    DependencyConditionConfig, DependencyConfig, HealthConfig, NixConfig, ResourceConfig,
+};
+use dtx_core::translation::import::{
+    DockerComposeImporter, ImportFormat, ImportedConfig, ImportedResource, Importer,
+    ProcessComposeImporter, ProcfileImporter,
+};
+use dtx_core::{sync_add_package, Environment, Port, ServiceName, ShellCommand};
+use indexmap::IndexMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Arguments for the import command.
+pub struct ImportArgs {
+    pub file: PathBuf,
+    pub format: Option<String>,
+    pub no_nix: bool,
+    pub dry_run: bool,
+}
+
+/// Parse format string to ImportFormat.
+fn parse_format(format: &str) -> Result<ImportFormat> {
+    match format.to_lowercase().as_str() {
+        "process-compose" | "pc" => Ok(ImportFormat::ProcessCompose),
+        "docker-compose" | "docker" | "dc" => Ok(ImportFormat::DockerCompose),
+        "procfile" | "heroku" => Ok(ImportFormat::Procfile),
+        "auto" => Ok(ImportFormat::Auto),
+        _ => bail!(
+            "Unknown format '{}'. Valid formats: process-compose, docker-compose, procfile, auto",
+            format
+        ),
+    }
+}
+
+/// Detect format from file path and content.
+fn detect_format(path: &Path, content: &str) -> Result<ImportFormat> {
+    if let Some(format) = ImportFormat::from_path(path) {
+        return Ok(format);
+    }
+
+    if let Some(format) = ImportFormat::from_content(content) {
+        return Ok(format);
+    }
+
+    bail!(
+        "Unable to detect configuration format for '{}'. Use --format to specify.",
+        path.display()
+    )
+}
+
+/// Get the appropriate importer for a format.
+fn get_importer(format: ImportFormat) -> Box<dyn Importer> {
+    match format {
+        ImportFormat::ProcessCompose => Box::new(ProcessComposeImporter::new()),
+        ImportFormat::DockerCompose => Box::new(DockerComposeImporter::new()),
+        ImportFormat::Procfile => Box::new(ProcfileImporter::new()),
+        ImportFormat::Auto => {
+            unreachable!("Auto format should be resolved before calling get_importer")
+        }
+    }
+}
+
+/// Display a summary of imported resources.
+fn display_import_summary(out: &Output, config: &ImportedConfig) {
+    if let Some(ref name) = config.project_name {
+        out.raw(&format!("Project: {}\n", name));
+    }
+
+    out.blank();
+    out.raw(&format!("Imported {} resource(s):\n", config.resources.len()));
+    out.blank();
+
+    for resource in &config.resources {
+        out.raw(&format!("  [{}]\n", resource.name));
+
+        if let Some(ref cmd) = resource.command {
+            out.raw(&format!("    command: {}\n", cmd));
+        }
+
+        if let Some(ref image) = resource.image {
+            out.raw(&format!("    image: {}\n", image));
+        }
+
+        if let Some(port) = resource.port {
+            out.raw(&format!("    port: {}\n", port));
+        }
+
+        if let Some(ref dir) = resource.working_dir {
+            out.raw(&format!("    working_dir: {}\n", dir));
+        }
+
+        if !resource.environment.is_empty() {
+            out.raw("    environment:\n");
+            for (key, value) in &resource.environment {
+                out.raw(&format!("      {}={}\n", key, value));
+            }
+        }
+
+        if !resource.depends_on.is_empty() {
+            out.raw(&format!("    depends_on: {}\n", resource.depends_on.join(", ")));
+        }
+
+        if let Some(ref hc) = resource.health_check {
+            out.raw(&format!("    health_check: {}\n", hc));
+        }
+
+        if let Some(ref restart) = resource.restart {
+            out.raw(&format!("    restart: {}\n", restart));
+        }
+
+        out.blank();
+    }
+
+    if !config.warnings.is_empty() {
+        for warning in &config.warnings {
+            out.warning(&format!("{}", warning));
+        }
+        out.blank();
+    }
+}
+
+/// Infer Nix package from resource.
+fn infer_nix_package(resource: &ImportedResource) -> Option<String> {
+    use dtx_core::nix::{extract_executable, PackageMappings};
+
+    let mappings = PackageMappings::load();
+
+    if let Some(pkg) = mappings.get_package(&resource.name) {
+        return Some(pkg.clone());
+    }
+
+    if let Some(ref cmd) = resource.command {
+        if let Some(executable) = extract_executable(cmd) {
+            if let Some(pkg) = mappings.get_package(&executable) {
+                return Some(pkg.clone());
+            }
+        }
+    }
+
+    if let Some(ref image) = resource.image {
+        let base = image.split(':').next().unwrap_or(image);
+        let base = base.split('/').next_back().unwrap_or(base);
+        if let Some(pkg) = mappings.get_package(base) {
+            return Some(pkg.clone());
+        }
+    }
+
+    None
+}
+
+/// Create a ResourceConfig from an imported resource.
+fn resource_config_from_imported(
+    resource: &ImportedResource,
+    nix_package: Option<String>,
+) -> Result<ResourceConfig> {
+    // Validate service name
+    let _: ServiceName = resource
+        .name
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid service name '{}': {}", resource.name, e))?;
+
+    // Validate dependency names
+    for dep_name in &resource.depends_on {
+        dep_name
+            .parse::<ServiceName>()
+            .map_err(|e| anyhow::anyhow!("Invalid dependency name '{}': {}", dep_name, e))?;
+    }
+
+    // Get command
+    let command = match &resource.command {
+        Some(cmd) => cmd.clone(),
+        None => {
+            if let Some(ref image) = resource.image {
+                format!("# TODO: Replace with actual command for {}", image)
+            } else {
+                format!("# TODO: Add command for {}", resource.name)
+            }
+        }
+    };
+
+    // Validate command
+    let _: ShellCommand = command
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid command: {}", e))?;
+
+    // Validate port
+    let port = resource
+        .port
+        .map(Port::try_from)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Invalid port: {}", e))?
+        .map(u16::from);
+
+    // Parse environment variables
+    let environment: IndexMap<String, String> = if resource.environment.is_empty() {
+        IndexMap::new()
+    } else {
+        let env_strings: Vec<String> = resource
+            .environment
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        let env = Environment::from_strings(&env_strings)
+            .map_err(|e| anyhow::anyhow!("Invalid environment variable: {}", e))?;
+        env.into_map().into_iter().collect()
+    };
+
+    // Parse dependencies
+    let depends_on: Vec<DependencyConfig> = resource
+        .depends_on
+        .iter()
+        .map(|name| {
+            let mut map = IndexMap::new();
+            map.insert(name.clone(), DependencyConditionConfig::Healthy);
+            DependencyConfig::WithCondition(map)
+        })
+        .collect();
+
+    // Parse health check
+    let health = resource.health_check.as_ref().map(|hc| HealthConfig {
+        exec: Some(hc.clone()),
+        ..Default::default()
+    });
+
+    // Build nix config
+    let nix = nix_package.map(|pkg| NixConfig {
+        packages: vec![pkg],
+        ..Default::default()
+    });
+
+    Ok(ResourceConfig {
+        command: Some(command),
+        port,
+        working_dir: resource.working_dir.as_ref().map(PathBuf::from),
+        environment,
+        depends_on,
+        health,
+        nix,
+        ..Default::default()
+    })
+}
+
+/// Run the import command.
+pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
+    let ImportArgs {
+        file,
+        format,
+        no_nix,
+        dry_run,
+    } = args;
+
+    if !file.exists() {
+        out.step("import").fail_untimed(&format!("file not found: {}", file.display()));
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&file)?;
+
+    let resolved_format = match format {
+        Some(f) => {
+            let fmt = parse_format(&f)?;
+            if fmt == ImportFormat::Auto {
+                detect_format(&file, &content)?
+            } else {
+                fmt
+            }
+        }
+        None => detect_format(&file, &content)?,
+    };
+
+    out.step("format")
+        .done_untimed(&format!("{:?} (from {})", resolved_format, file.display()));
+
+    let importer = get_importer(resolved_format);
+    let config = importer.import(&content)?;
+
+    display_import_summary(out, &config);
+
+    if dry_run {
+        out.step("import").done_untimed("dry run, no changes");
+        return Ok(());
+    }
+
+    let mut group = out.group("import");
+
+    let mut created_count = 0;
+    let mut skipped_count = 0;
+
+    for resource in &config.resources {
+        // Check if service already exists
+        if ctx.store.get_resource(&resource.name).is_some() {
+            group.child_done(&resource.name, "skipped (exists)");
+            skipped_count += 1;
+            continue;
+        }
+
+        // Infer Nix package
+        let nix_package = if no_nix {
+            None
+        } else {
+            infer_nix_package(resource)
+        };
+
+        match resource_config_from_imported(resource, nix_package.clone()) {
+            Ok(rc) => {
+                ctx.store
+                    .add_resource(&resource.name, rc)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                // Sync flake.nix if service has a package
+                let flake_note = if let Some(ref pkg) = nix_package {
+                    let project_root = ctx.store.project_root();
+                    let project_name = ctx.store.project_name();
+                    match sync_add_package(project_root, project_name, pkg) {
+                        Ok(true) => format!("added (flake.nix updated with '{}')", pkg),
+                        Ok(false) => {
+                            if let Some(ref p) = nix_package {
+                                format!("added (package: {})", p)
+                            } else {
+                                "added".to_string()
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to sync flake.nix: {}", e);
+                            "added".to_string()
+                        }
+                    }
+                } else {
+                    "added".to_string()
+                };
+
+                group.child_done(&resource.name, &flake_note);
+                created_count += 1;
+            }
+            Err(e) => {
+                group.child_fail(&resource.name, &format!("{}", e));
+            }
+        }
+    }
+
+    // Save all at once
+    ctx.store.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    group.done_with_summary(&format!("{} created, {} skipped", created_count, skipped_count));
+
+    // Notify web/TUI of config change (fire-and-forget, sync)
+    dtx_core::notify_config_changed_sync();
+
+    Ok(())
+}

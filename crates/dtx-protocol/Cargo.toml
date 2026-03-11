@@ -1,0 +1,43 @@
+[package]
+name = "dtx-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JSON-RPC protocol and MCP integration for dtx"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Random for request IDs
+rand = "0.8"
+
+# HTTP transport (optional)
+reqwest = { workspace = true, optional = true }
+
+# WebSocket transport (optional)
+tokio-tungstenite = { version = "0.24", optional = true }
+
+# Axum integration (optional)
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[features]
+default = ["http", "websocket"]
+http = ["dep:reqwest"]
+websocket = ["dep:tokio-tungstenite"]
+axum = ["dep:axum"]

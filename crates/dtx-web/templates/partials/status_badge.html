@@ -1,0 +1,44 @@
+{# Status Badge Component #}
+{# Usage: {% include "partials/status_badge.html" %} with status variable in context #}
+
+{% if status == "running" %}
+<span class="dtx-status-badge dtx-status-badge--running">
+    <span class="dtx-status-badge__indicator"></span>
+    RUNNING
+</span>
+{% else if status == "starting" %}
+<span class="dtx-status-badge dtx-status-badge--starting">
+    <span class="dtx-status-badge__indicator"></span>
+    STARTING
+</span>
+{% else if status == "stopped" %}
+<span class="dtx-status-badge dtx-status-badge--stopped">
+    <span class="dtx-status-badge__indicator"></span>
+    STOPPED
+</span>
+{% else if status == "error" %}
+<span class="dtx-status-badge dtx-status-badge--error">
+    <span class="dtx-status-badge__indicator"></span>
+    ERROR
+</span>
+{% else if status == "ephemeral" %}
+<span class="dtx-status-badge dtx-status-badge--ephemeral">
+    <span class="dtx-status-badge__indicator"></span>
+    EPHEMERAL
+</span>
+{% else if status == "processing" %}
+<span class="dtx-status-badge dtx-status-badge--processing">
+    <span class="dtx-status-badge__indicator"></span>
+    PROCESSING
+</span>
+{% else if status == "active" %}
+<span class="dtx-status-badge dtx-status-badge--active">
+    <span class="dtx-status-badge__indicator"></span>
+    ACTIVE
+</span>
+{% else %}
+<span class="dtx-status-badge dtx-status-badge--stopped">
+    <span class="dtx-status-badge__indicator"></span>
+    {{ status|upper }}
+</span>
+{% endif %}

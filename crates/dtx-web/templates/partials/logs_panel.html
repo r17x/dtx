@@ -1,0 +1,9 @@
+<div class="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-sm">
+    <div class="flex justify-between items-center mb-2">
+        <span class="text-gray-400">Logs: {{ service }}</span>
+        <button onclick="this.closest('.logs-panel').remove()" class="text-gray-400 hover:text-white">
+            &times;
+        </button>
+    </div>
+    <pre class="whitespace-pre-wrap">{{ logs }}</pre>
+</div>

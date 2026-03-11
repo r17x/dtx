@@ -1,0 +1,350 @@
+{# Nix Environment Panel - Cyberpunk styled #}
+
+<div id="nix-panel" class="space-y-6">
+    <div class="dtx-panel">
+        <div class="dtx-panel__header">
+            <h3 class="dtx-panel__title flex items-center gap-2">
+                <span class="text-status-ephemeral">&#x2699;</span>
+                Nix Environment
+            </h3>
+            <button onclick="refreshNixStatus()"
+                    class="dtx-btn dtx-btn--ghost dtx-btn--sm"
+                    title="Refresh status">
+                &#x21BB;
+            </button>
+        </div>
+
+        <div id="nix-content" class="dtx-panel__body">
+            <div class="flex items-center justify-center py-8 text-gray-500">
+                <div class="w-5 h-5 border-2 border-status-active border-t-transparent rounded-full animate-spin mr-2"></div>
+                Loading...
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    // Single-project model — no project_id needed
+
+    async function refreshNixStatus() {
+        const container = document.getElementById('nix-content');
+
+        // Show loading
+        container.innerHTML = `
+            <div class="flex items-center justify-center py-8 text-gray-500">
+                <div class="w-5 h-5 border-2 border-status-active border-t-transparent rounded-full animate-spin mr-2"></div>
+                Loading...
+            </div>
+        `;
+
+        try {
+            const response = await fetch(`/api/nix/status`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            renderNixStatus(data);
+        } catch (error) {
+            container.innerHTML = `
+                <div class="text-status-error text-center py-4">
+                    <p>Failed to load Nix status</p>
+                    <p class="text-sm mt-1">${escapeHtml(error.message)}</p>
+                    <button onclick="refreshNixStatus()" class="dtx-btn dtx-btn--ghost dtx-btn--sm mt-3">
+                        Retry
+                    </button>
+                </div>
+            `;
+        }
+    }
+
+    function renderNixStatus(data) {
+        const container = document.getElementById('nix-content');
+
+        let html = `
+            <!-- Flake Status -->
+            <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-gray-400">flake.nix</span>
+                    <div class="flex items-center gap-2">
+                        ${data.has_flake ? `
+                            <span class="dtx-status-badge dtx-status-badge--running">
+                                <span class="dtx-status-badge__indicator"></span>
+                                Present
+                            </span>
+                            <button onclick="openFlakeEditorModal()" class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                                Edit
+                            </button>
+                        ` : `
+                            <span class="dtx-status-badge">
+                                Auto-created on first package
+                            </span>
+                        `}
+                    </div>
+                </div>
+
+                <!-- Envrc Status -->
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-gray-400">.envrc</span>
+                    ${data.has_envrc ? `
+                        <span class="dtx-status-badge dtx-status-badge--running">
+                            <span class="dtx-status-badge__indicator"></span>
+                            Present
+                        </span>
+                    ` : `
+                        <button onclick="generateEnvrc()" class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                            Generate
+                        </button>
+                    `}
+                </div>
+
+                <!-- Packages List -->
+                <div class="pt-4 border-t border-dtx-border">
+                    <h4 class="text-xs text-gray-500 uppercase tracking-wide mb-3">Packages</h4>
+                    <div class="flex flex-wrap gap-2">
+        `;
+
+        if (data.packages.length === 0) {
+            html += `
+                        <span class="text-sm text-gray-500">No Nix packages configured</span>
+            `;
+        } else {
+            const uniquePackages = [...new Set(data.packages)].sort();
+            uniquePackages.forEach(pkg => {
+                html += `
+                        <span class="dtx-tag dtx-tag--purple">${escapeHtml(pkg)}</span>
+                `;
+            });
+        }
+
+        html += `
+                        <span class="dtx-tag">process-compose</span>
+                    </div>
+                </div>
+
+                <!-- Auto-sync Info -->
+                <div class="pt-4 border-t border-dtx-border">
+                    <p class="text-xs text-gray-500">
+                        ${data.has_flake
+                            ? 'flake.nix is automatically updated when services change.'
+                            : 'flake.nix will be created when you add your first service with a package.'}
+                    </p>
+                </div>
+            </div>
+        `;
+
+        container.innerHTML = html;
+    }
+
+    async function generateEnvrc() {
+        try {
+            const response = await fetch(`/api/nix/envrc`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            showNotification('Generated .envrc', 'success');
+            await refreshNixStatus();
+        } catch (error) {
+            showNotification('Failed to generate .envrc: ' + error.message, 'error');
+        }
+    }
+
+    function showNotification(message, type) {
+        const notification = document.createElement('div');
+        notification.className = `fixed top-4 right-4 px-4 py-2 rounded-lg shadow-lg font-mono text-sm z-50 ${
+            type === 'success'
+                ? 'bg-status-running/20 text-status-running border border-status-running/30'
+                : 'bg-status-error/20 text-status-error border border-status-error/30'
+        }`;
+        notification.textContent = message;
+
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+            notification.remove();
+        }, 3000);
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // === Flake Editor Modal ===
+    // Modal is injected into document.body to avoid being trapped inside
+    // the detail panel's CSS transform (which breaks position:fixed).
+
+    let flakeDebounceTimer = null;
+    let flakeModalEl = null;
+
+    function ensureFlakeModal() {
+        if (flakeModalEl) return flakeModalEl;
+
+        const div = document.createElement('div');
+        div.id = 'flake-editor-modal';
+        div.className = 'dtx-modal-overlay hidden';
+        div.onclick = function() { closeFlakeEditorModal(); };
+        div.innerHTML = `
+            <div class="dtx-modal" style="width: 640px; max-height: 85vh; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+                    <h2 class="dtx-modal__title font-mono" style="margin-bottom: 0;">flake.nix</h2>
+                    <span id="flake-editor-status" style="font-size: 0.75rem; padding: 2px 8px; border-radius: 4px;"></span>
+                </div>
+                <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+                    <textarea id="flake-editor-textarea"
+                              spellcheck="false"
+                              style="flex: 1; min-height: 320px; width: 100%; padding: 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.8125rem; line-height: 1.5; resize: vertical; outline: none;"
+                              onfocus="this.style.borderColor='var(--dtx-cyan)'"
+                              onblur="this.style.borderColor='var(--dtx-border-subtle)'"
+                    ></textarea>
+                    <div id="flake-editor-error"
+                         style="margin-top: 8px; font-size: 0.75rem; font-family: var(--dtx-font-mono); color: var(--dtx-pink); display: none;"></div>
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 16px;">
+                    <button type="button" onclick="closeFlakeEditorModal()"
+                            class="dtx-btn dtx-btn--ghost" style="flex: 1;">
+                        Cancel
+                    </button>
+                    <button type="button" id="flake-editor-save-btn" onclick="saveFlakeEditor()" disabled
+                            class="dtx-btn dtx-btn--primary" style="flex: 1;">
+                        Save
+                    </button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(div);
+        flakeModalEl = div;
+        return div;
+    }
+
+    async function openFlakeEditorModal() {
+        const modal = ensureFlakeModal();
+        const textarea = document.getElementById('flake-editor-textarea');
+        const statusEl = document.getElementById('flake-editor-status');
+        const saveBtn = document.getElementById('flake-editor-save-btn');
+        const errorEl = document.getElementById('flake-editor-error');
+
+        textarea.value = 'Loading...';
+        textarea.disabled = true;
+        statusEl.textContent = '';
+        statusEl.style.cssText = '';
+        saveBtn.disabled = true;
+        errorEl.style.display = 'none';
+        modal.classList.remove('hidden');
+
+        try {
+            const response = await fetch(`/api/files/flake`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+
+            textarea.value = data.content;
+            textarea.disabled = false;
+
+            // Debounced validation on input
+            textarea.oninput = () => {
+                clearTimeout(flakeDebounceTimer);
+                flakeDebounceTimer = setTimeout(() => runFlakeValidation(), 500);
+            };
+
+            runFlakeValidation();
+            textarea.focus();
+        } catch (error) {
+            showNotification(`Failed to load flake.nix: ${error.message}`, 'error');
+            modal.classList.add('hidden');
+        }
+    }
+
+    async function runFlakeValidation() {
+        const textarea = document.getElementById('flake-editor-textarea');
+        const statusEl = document.getElementById('flake-editor-status');
+        const saveBtn = document.getElementById('flake-editor-save-btn');
+        const errorEl = document.getElementById('flake-editor-error');
+        const content = textarea.value;
+
+        try {
+            const response = await fetch(`/api/files/flake/validate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const result = await response.json();
+
+            if (result.valid) {
+                statusEl.textContent = 'Valid';
+                statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(34,197,94,0.15); color:#22c55e;';
+                saveBtn.disabled = false;
+                errorEl.style.display = 'none';
+            } else {
+                statusEl.textContent = 'Invalid';
+                statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(236,72,153,0.15); color:#ec4899;';
+                saveBtn.disabled = true;
+                errorEl.textContent = result.error || 'Nix syntax error';
+                errorEl.style.display = 'block';
+            }
+        } catch (error) {
+            statusEl.textContent = 'Error';
+            statusEl.style.cssText = 'font-size:0.75rem; padding:2px 8px; border-radius:4px; background:rgba(236,72,153,0.15); color:#ec4899;';
+            saveBtn.disabled = true;
+            errorEl.textContent = error.message;
+            errorEl.style.display = 'block';
+        }
+    }
+
+    async function saveFlakeEditor() {
+        const textarea = document.getElementById('flake-editor-textarea');
+        const saveBtn = document.getElementById('flake-editor-save-btn');
+        const content = textarea.value;
+
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+
+        try {
+            const response = await fetch(`/api/files/flake`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            });
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.error || `HTTP ${response.status}`);
+            }
+
+            showNotification('flake.nix saved', 'success');
+            closeFlakeEditorModal();
+        } catch (error) {
+            showNotification(`Failed to save: ${error.message}`, 'error');
+            saveBtn.disabled = false;
+        } finally {
+            saveBtn.textContent = 'Save';
+        }
+    }
+
+    function closeFlakeEditorModal() {
+        clearTimeout(flakeDebounceTimer);
+        const modal = document.getElementById('flake-editor-modal');
+        if (modal) modal.classList.add('hidden');
+    }
+
+    // Make functions global
+    window.refreshNixStatus = refreshNixStatus;
+    window.generateEnvrc = generateEnvrc;
+    window.openFlakeEditorModal = openFlakeEditorModal;
+    window.saveFlakeEditor = saveFlakeEditor;
+    window.closeFlakeEditorModal = closeFlakeEditorModal;
+
+    // Close on escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeFlakeEditorModal();
+    });
+
+    // Load on initialization
+    refreshNixStatus();
+})();
+</script>
