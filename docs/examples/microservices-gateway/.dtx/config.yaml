@@ -1,0 +1,349 @@
+# dtx v2 - Microservices Gateway Example
+# API gateway pattern with multiple backend services
+
+project:
+  name: microservices-gateway
+  description: Microservices architecture with API gateway
+
+settings:
+  log_level: info
+  health_check_interval: 5s
+  shutdown_timeout: 60s
+
+server:
+  port: 3000
+  host: 127.0.0.1
+
+middleware:
+  logging:
+    enabled: true
+    level: info
+    format: json
+  metrics:
+    enabled: true
+    endpoint: /metrics
+    port: 9090
+  tracing:
+    enabled: true
+    endpoint: http://localhost:4317
+    service_name: microservices-gateway
+
+health:
+  interval: 5s
+  timeout: 10s
+  retries: 3
+
+restart:
+  policy: on-failure
+  max_retries: 5
+  backoff_initial: 1s
+  backoff_max: 60s
+  backoff_multiplier: 2.0
+
+resources:
+  # =============================================================================
+  # INFRASTRUCTURE: Databases and Caches
+  # =============================================================================
+
+  postgres:
+    kind: process
+    command: postgres -D ${PGDATA}
+    port: 5432
+    environment:
+      PGDATA: ./.dtx/data/postgres
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: development
+    health:
+      exec: pg_isready -h 127.0.0.1 -p 5432
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    restart: on-failure
+
+  redis:
+    kind: process
+    command: redis-server --port 6379 --dir ./.dtx/data/redis
+    port: 6379
+    health:
+      tcp: 127.0.0.1:6379
+      interval: 2s
+      timeout: 3s
+    restart: on-failure
+
+  elasticsearch:
+    kind: process
+    command: |
+      elasticsearch -E path.data=./.dtx/data/elasticsearch \
+                    -E path.logs=./.dtx/logs/elasticsearch \
+                    -E discovery.type=single-node \
+                    -E xpack.security.enabled=false
+    port: 9200
+    environment:
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    health:
+      http:
+        path: /_cluster/health
+        port: 9200
+      initial_delay: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: on-failure
+
+  # =============================================================================
+  # BOOTSTRAP: Database Initialization
+  # =============================================================================
+
+  db-init:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      set -e
+      export PGPASSWORD=development
+
+      # Create databases for each service
+      for db in users orders products auth; do
+        psql -h localhost -U app -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || \
+        psql -h localhost -U app -c "CREATE DATABASE $db"
+      done
+
+      # Run migrations if they exist
+      for service in users orders products auth; do
+        if [ -f "./services/$service/migrations/001_init.sql" ]; then
+          psql -h localhost -U app -d $service -f "./services/$service/migrations/001_init.sql"
+        fi
+      done
+
+      echo "Database initialization complete"
+    depends_on:
+      - postgres: healthy
+    restart: no
+
+  es-init:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      # Create product search index
+      curl -X PUT "localhost:9200/products" -H 'Content-Type: application/json' -d'
+      {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "name": { "type": "text" },
+            "description": { "type": "text" },
+            "price": { "type": "float" },
+            "category": { "type": "keyword" }
+          }
+        }
+      }
+      ' 2>/dev/null || true
+
+      echo "Elasticsearch initialization complete"
+    depends_on:
+      - elasticsearch: healthy
+    restart: no
+
+  # =============================================================================
+  # MICROSERVICES
+  # =============================================================================
+
+  auth-svc:
+    kind: process
+    command: node services/auth/index.js
+    port: 3004
+    working_dir: .
+    depends_on:
+      - db-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3004"
+      DATABASE_URL: postgres://app:development@localhost:5432/auth
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: dev-secret-change-in-production
+      JWT_EXPIRES_IN: 1h
+    health:
+      http:
+        path: /health
+        port: 3004
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  users-svc:
+    kind: process
+    command: node services/users/index.js
+    port: 3001
+    working_dir: .
+    depends_on:
+      - db-init: completed
+      - auth-svc: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3001"
+      DATABASE_URL: postgres://app:development@localhost:5432/users
+      AUTH_SERVICE_URL: http://localhost:3004
+    health:
+      http:
+        path: /health
+        port: 3001
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  products-svc:
+    kind: process
+    command: node services/products/index.js
+    port: 3003
+    working_dir: .
+    depends_on:
+      - db-init: completed
+      - es-init: completed
+    environment:
+      NODE_ENV: development
+      PORT: "3003"
+      DATABASE_URL: postgres://app:development@localhost:5432/products
+      ELASTICSEARCH_URL: http://localhost:9200
+    health:
+      http:
+        path: /health
+        port: 3003
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  orders-svc:
+    kind: process
+    command: node services/orders/index.js
+    port: 3002
+    working_dir: .
+    depends_on:
+      - db-init: completed
+      - users-svc: healthy
+      - products-svc: healthy
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3002"
+      DATABASE_URL: postgres://app:development@localhost:5432/orders
+      REDIS_URL: redis://localhost:6379
+      USERS_SERVICE_URL: http://localhost:3001
+      PRODUCTS_SERVICE_URL: http://localhost:3003
+    health:
+      http:
+        path: /health
+        port: 3002
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  search-svc:
+    kind: process
+    command: node services/search/index.js
+    port: 3005
+    working_dir: .
+    depends_on:
+      - es-init: completed
+      - products-svc: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3005"
+      ELASTICSEARCH_URL: http://localhost:9200
+      PRODUCTS_SERVICE_URL: http://localhost:3003
+    health:
+      http:
+        path: /health
+        port: 3005
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # API GATEWAY: Kong
+  # =============================================================================
+
+  gateway:
+    kind: process
+    command: |
+      kong start -c ./gateway/kong.conf --vv
+    port: 8000
+    working_dir: .
+    depends_on:
+      - auth-svc: healthy
+      - users-svc: healthy
+      - products-svc: healthy
+      - orders-svc: healthy
+      - search-svc: healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: ./gateway/kong.yaml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_LOG_LEVEL: info
+    health:
+      http:
+        path: /status
+        port: 8001
+      initial_delay: 5s
+      interval: 10s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # BACKGROUND WORKERS
+  # =============================================================================
+
+  order-processor:
+    kind: process
+    command: node services/orders/worker.js
+    working_dir: .
+    depends_on:
+      - orders-svc: healthy
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://app:development@localhost:5432/orders
+      REDIS_URL: redis://localhost:6379
+      WORKER_CONCURRENCY: "2"
+    restart: on-failure
+
+  search-indexer:
+    kind: process
+    command: node services/search/indexer.js
+    working_dir: .
+    depends_on:
+      - search-svc: healthy
+      - products-svc: healthy
+    environment:
+      NODE_ENV: development
+      ELASTICSEARCH_URL: http://localhost:9200
+      PRODUCTS_SERVICE_URL: http://localhost:3003
+      INDEX_INTERVAL: "60000"
+    restart: on-failure
+
+  # =============================================================================
+  # MONITORING (optional)
+  # =============================================================================
+
+  health-aggregator:
+    kind: process
+    command: |
+      #!/bin/bash
+      while true; do
+        echo "=== Service Health Check $(date) ==="
+        for svc in auth-svc:3004 users-svc:3001 products-svc:3003 orders-svc:3002 search-svc:3005; do
+          name=${svc%:*}
+          port=${svc#*:}
+          status=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/health" || echo "000")
+          echo "$name: $status"
+        done
+        sleep 30
+      done
+    depends_on:
+      - gateway: healthy
+    restart: on-failure
