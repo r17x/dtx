@@ -29,6 +29,10 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
     if let UiMode::Confirm { ref message, .. } = app.mode {
         draw_confirm_dialog(f, message, f.area());
     }
+
+    if matches!(app.mode, UiMode::Help) {
+        draw_help_overlay(f, f.area());
+    }
 }
 
 /// Draw the header.
@@ -385,15 +389,43 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     }
 }
 
-/// Draw the footer with keybindings.
+/// Draw the footer with context-aware keybindings.
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let keybindings = [
-        ("q", "Quit"),
-        ("↑↓", "Select"),
-        ("r", "Restart"),
-        ("s", "Stop"),
-        ("c", "Clear"),
-    ];
+    let keybindings: Vec<(&str, &str)> = match &app.mode {
+        UiMode::Normal => vec![
+            ("j/k", "Navigate"),
+            ("Enter", "Detail"),
+            ("/", "Search"),
+            ("F", "Filter"),
+            ("s", "Stop"),
+            ("S", "Start"),
+            ("r", "Restart"),
+            ("?", "Help"),
+            ("q", "Quit"),
+        ],
+        UiMode::Detail => vec![
+            ("Esc", "Back"),
+            ("j/k", "Navigate"),
+            ("s", "Stop"),
+            ("S", "Start"),
+            ("r", "Restart"),
+        ],
+        UiMode::Search { .. } => vec![
+            ("Enter", "Find"),
+            ("Esc", "Cancel"),
+        ],
+        UiMode::Filter { .. } => vec![
+            ("Enter", "Apply"),
+            ("Esc", "Clear"),
+        ],
+        UiMode::Confirm { .. } => vec![
+            ("y", "Yes"),
+            ("n", "No"),
+        ],
+        UiMode::Help => vec![
+            ("?/Esc", "Close"),
+        ],
+    };
 
     let mut spans = Vec::new();
     for (i, (key, action)) in keybindings.iter().enumerate() {
@@ -409,6 +441,15 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw(format!(" {}", action)));
     }
 
+    // Add reload indicator if config changed
+    if app.config_changed {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "[a] Reload",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Add status message if present
     if let Some(ref msg) = app.status_message {
         spans.push(Span::raw("  │  "));
@@ -422,6 +463,78 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     );
 
     f.render_widget(footer, area);
+}
+
+fn draw_help_overlay(f: &mut Frame, area: Rect) {
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 20u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let overlay_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, overlay_area);
+
+    let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let group_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+
+    let lines = vec![
+        Line::from(Span::styled(" Navigation", group_style)),
+        Line::from(vec![
+            Span::styled("  j/k ↑↓  ", key_style), Span::raw("Select service"),
+        ]),
+        Line::from(vec![
+            Span::styled("  g/G     ", key_style), Span::raw("Jump to top/bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter   ", key_style), Span::raw("Detail view"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc     ", key_style), Span::raw("Back / Close"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(" Logs", group_style)),
+        Line::from(vec![
+            Span::styled("  PgUp/Dn ", key_style), Span::raw("Scroll logs"),
+        ]),
+        Line::from(vec![
+            Span::styled("  /       ", key_style), Span::raw("Search logs"),
+        ]),
+        Line::from(vec![
+            Span::styled("  n/N     ", key_style), Span::raw("Next/prev match"),
+        ]),
+        Line::from(vec![
+            Span::styled("  F       ", key_style), Span::raw("Filter logs"),
+        ]),
+        Line::from(vec![
+            Span::styled("  c       ", key_style), Span::raw("Clear logs"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(" Control", group_style)),
+        Line::from(vec![
+            Span::styled("  s       ", key_style), Span::raw("Stop service"),
+        ]),
+        Line::from(vec![
+            Span::styled("  S       ", key_style), Span::raw("Start service"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r       ", key_style), Span::raw("Restart service"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d       ", key_style), Span::raw("Delete service"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q       ", key_style), Span::raw("Quit"),
+        ]),
+    ];
+
+    let help = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Help — ? to close ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+
+    f.render_widget(help, overlay_area);
 }
 
 fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {

@@ -137,6 +137,7 @@ pub enum UiMode {
     Filter { query: String, cursor: usize },
     Detail,
     Confirm { action: ConfirmAction, message: String },
+    Help,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -394,6 +395,7 @@ impl App {
             UiMode::Filter { .. } => self.handle_key_filter(key),
             UiMode::Detail => self.handle_key_detail(key),
             UiMode::Confirm { .. } => self.handle_key_confirm(key),
+            UiMode::Help => self.handle_key_help(key),
         }
     }
 
@@ -498,6 +500,20 @@ impl App {
             KeyCode::Enter => {
                 self.gather_detail();
                 self.mode = UiMode::Detail;
+                None
+            }
+            KeyCode::Char('?') => {
+                self.mode = UiMode::Help;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_key_help(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = UiMode::Normal;
                 None
             }
             _ => None,
