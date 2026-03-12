@@ -29,8 +29,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
       - uses: DeterminateSystems/flake-checker-action@v12
       - uses: cachix/cachix-action@v16
         with:
@@ -87,8 +85,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
+        if: runner.os == 'Linux'
       - uses: cachix/cachix-action@v16
         with:
           name: r17x
@@ -114,8 +111,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
       - uses: cachix/cachix-action@v16
         with:
           name: r17x
@@ -138,8 +133,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
       - uses: cachix/cachix-action@v16
         with:
           name: r17x
@@ -162,8 +155,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
       - uses: cachix/cachix-action@v16
         with:
           name: r17x
