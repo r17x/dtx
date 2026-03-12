@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, DisplayHealth, DisplayState, ServiceDisplayInfo};
+use super::app::{App, DisplayHealth, DisplayState, ServiceDisplayInfo, UiMode};
 
 /// Main draw function with service infos.
 pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo]) {
@@ -182,16 +182,40 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
         inner_height,
     );
     let end = total.saturating_sub(app.log_scroll.offset_from_bottom);
+    let search_query = app.search_state.as_ref().map(|s| s.query.to_lowercase());
+
     let visible_logs: Vec<Line> = visible
         .iter()
         .map(|log| {
-            let content_style = if is_error_line(&log.content) {
+            let base_style = if log.is_stderr || is_error_line(&log.content) {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default()
             };
 
-            Line::from(vec![Span::styled(&log.content, content_style)])
+            if let Some(ref query) = search_query {
+                let content_lower = log.content.to_lowercase();
+                let mut spans = Vec::new();
+                let mut last_end = 0;
+
+                for (start, _) in content_lower.match_indices(query) {
+                    if start > last_end {
+                        spans.push(Span::styled(&log.content[last_end..start], base_style));
+                    }
+                    let end = start + query.len();
+                    spans.push(Span::styled(
+                        &log.content[start..end],
+                        Style::default().bg(Color::Yellow).fg(Color::Black),
+                    ));
+                    last_end = end;
+                }
+                if last_end < log.content.len() {
+                    spans.push(Span::styled(&log.content[last_end..], base_style));
+                }
+                Line::from(spans)
+            } else {
+                Line::from(vec![Span::styled(&log.content, base_style)])
+            }
         })
         .collect();
 
@@ -215,6 +239,22 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     );
 
     f.render_widget(logs, area);
+
+    // Render search bar if in search mode
+    if let UiMode::Search { ref query, .. } = app.mode {
+        let search_area = Rect {
+            x: area.x + 1,
+            y: area.y + area.height.saturating_sub(2),
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        let search_text = Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(query.as_str()),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]);
+        f.render_widget(Paragraph::new(search_text), search_area);
+    }
 }
 
 /// Draw the footer with keybindings.

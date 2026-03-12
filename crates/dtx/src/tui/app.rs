@@ -35,6 +35,7 @@ use super::ui;
 pub struct DisplayLog {
     pub service: String,
     pub content: String,
+    pub is_stderr: bool,
 }
 
 /// Service info for display (derived from events).
@@ -132,6 +133,14 @@ impl LogScroll {
 pub enum UiMode {
     #[default]
     Normal,
+    Search { query: String, cursor: usize },
+}
+
+/// Search state for log search results.
+pub struct SearchState {
+    pub query: String,
+    pub matches: Vec<usize>,
+    pub current_match: usize,
 }
 
 /// TUI application state.
@@ -160,6 +169,8 @@ pub struct App {
     pub mode: UiMode,
     /// Log scroll state.
     pub log_scroll: LogScroll,
+    /// Search state for log search.
+    pub search_state: Option<SearchState>,
 }
 
 impl App {
@@ -188,6 +199,7 @@ impl App {
             service_ports: HashMap::new(),
             mode: UiMode::Normal,
             log_scroll: LogScroll::new(),
+            search_state: None,
         }
     }
 
@@ -261,6 +273,7 @@ impl App {
                 self.log_store.append(DisplayLog {
                     service: id.to_string(),
                     content: line,
+                    is_stderr: matches!(stream, dtx_core::resource::LogStreamKind::Stderr),
                 });
 
                 if self.log_scroll.following {
@@ -314,6 +327,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyCode) -> Option<TuiAction> {
         match &self.mode {
             UiMode::Normal => self.handle_key_normal(key),
+            UiMode::Search { .. } => self.handle_key_search(key),
         }
     }
 
@@ -370,8 +384,138 @@ impl App {
                 self.status_message = Some("Logs cleared".to_string());
                 None
             }
+            KeyCode::Char('/') => {
+                self.mode = UiMode::Search { query: String::new(), cursor: 0 };
+                None
+            }
+            KeyCode::Char('n') => {
+                self.next_match();
+                None
+            }
+            KeyCode::Char('N') => {
+                self.prev_match();
+                None
+            }
             _ => None,
         }
+    }
+
+    fn handle_key_search(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Enter => {
+                self.execute_search();
+                None
+            }
+            KeyCode::Esc => {
+                self.mode = UiMode::Normal;
+                None
+            }
+            KeyCode::Backspace => {
+                if let UiMode::Search { ref mut query, ref mut cursor } = self.mode {
+                    if *cursor > 0 {
+                        query.remove(*cursor - 1);
+                        *cursor -= 1;
+                    }
+                }
+                None
+            }
+            KeyCode::Char(c) => {
+                if let UiMode::Search { ref mut query, ref mut cursor } = self.mode {
+                    query.insert(*cursor, c);
+                    *cursor += 1;
+                }
+                None
+            }
+            KeyCode::Left => {
+                if let UiMode::Search { ref mut cursor, .. } = self.mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                None
+            }
+            KeyCode::Right => {
+                if let UiMode::Search { ref query, ref mut cursor } = self.mode {
+                    if *cursor < query.len() {
+                        *cursor += 1;
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn execute_search(&mut self) {
+        let query = match &self.mode {
+            UiMode::Search { query, .. } => query.clone(),
+            _ => return,
+        };
+        if query.is_empty() {
+            self.search_state = None;
+            self.mode = UiMode::Normal;
+            return;
+        }
+        let query_lower = query.to_lowercase();
+        let selected_service = self.selected_service().map(|s| s.to_string());
+        let matches: Vec<usize> = self.log_store
+            .get_visible(selected_service.as_deref(), 0, usize::MAX)
+            .iter()
+            .enumerate()
+            .filter(|(_, log)| log.content.to_lowercase().contains(&query_lower))
+            .map(|(i, _)| i)
+            .collect();
+
+        if matches.is_empty() {
+            self.status_message = Some(format!("No matches for '{}'", query));
+            self.search_state = None;
+        } else {
+            let count = matches.len();
+            self.search_state = Some(SearchState {
+                query,
+                matches,
+                current_match: 0,
+            });
+            self.status_message = Some(format!("{} match(es) found", count));
+            self.jump_to_current_match();
+        }
+        self.mode = UiMode::Normal;
+    }
+
+    fn jump_to_current_match(&mut self) {
+        if let Some(ref state) = self.search_state {
+            if let Some(&match_idx) = state.matches.get(state.current_match) {
+                let total = self.filtered_log_count();
+                self.log_scroll.offset_from_bottom = total.saturating_sub(match_idx + 1);
+                self.log_scroll.following = self.log_scroll.offset_from_bottom == 0;
+            }
+        }
+    }
+
+    fn next_match(&mut self) {
+        if let Some(ref mut state) = self.search_state {
+            if !state.matches.is_empty() {
+                state.current_match = (state.current_match + 1) % state.matches.len();
+                let current = state.current_match;
+                let total_matches = state.matches.len();
+                self.status_message = Some(format!("Match {}/{}", current + 1, total_matches));
+            }
+        }
+        self.jump_to_current_match();
+    }
+
+    fn prev_match(&mut self) {
+        if let Some(ref mut state) = self.search_state {
+            if !state.matches.is_empty() {
+                state.current_match = if state.current_match == 0 {
+                    state.matches.len() - 1
+                } else {
+                    state.current_match - 1
+                };
+                let current = state.current_match;
+                let total_matches = state.matches.len();
+                self.status_message = Some(format!("Match {}/{}", current + 1, total_matches));
+            }
+        }
+        self.jump_to_current_match();
     }
 
     /// Get health status for a service.
