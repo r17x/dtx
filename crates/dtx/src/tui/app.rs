@@ -98,6 +98,35 @@ pub enum DisplayHealth {
     Unhealthy { reason: String },
 }
 
+/// Log scroll state for PgUp/PgDn navigation.
+pub struct LogScroll {
+    pub offset_from_bottom: usize,
+    pub following: bool,
+}
+
+impl LogScroll {
+    pub fn new() -> Self {
+        Self { offset_from_bottom: 0, following: true }
+    }
+
+    pub fn scroll_up(&mut self, lines: usize, total: usize) {
+        self.following = false;
+        self.offset_from_bottom = (self.offset_from_bottom + lines).min(total.saturating_sub(1));
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.offset_from_bottom = self.offset_from_bottom.saturating_sub(lines);
+        if self.offset_from_bottom == 0 {
+            self.following = true;
+        }
+    }
+
+    pub fn jump_to_bottom(&mut self) {
+        self.offset_from_bottom = 0;
+        self.following = true;
+    }
+}
+
 /// TUI interaction mode.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum UiMode {
@@ -131,6 +160,8 @@ pub struct App {
     service_ports: HashMap<String, u16>,
     /// Current UI mode.
     pub mode: UiMode,
+    /// Log scroll state.
+    pub log_scroll: LogScroll,
 }
 
 impl App {
@@ -156,6 +187,7 @@ impl App {
             health_states,
             service_ports: HashMap::new(),
             mode: UiMode::Normal,
+            log_scroll: LogScroll::new(),
         }
     }
 
@@ -232,6 +264,10 @@ impl App {
                 while self.logs.len() > self.max_logs {
                     self.logs.pop_front();
                 }
+
+                if self.log_scroll.following {
+                    self.log_scroll.offset_from_bottom = 0;
+                }
             }
             LifecycleEvent::ConfigChanged { .. } => {
                 self.config_changed = true;
@@ -263,6 +299,15 @@ impl App {
                 let state = DisplayState::from(proc.state());
                 self.service_states.insert(id.to_string(), state);
             }
+        }
+    }
+
+    /// Count filtered logs for the currently selected service.
+    pub fn filtered_log_count(&self) -> usize {
+        if let Some(name) = self.selected_service() {
+            self.logs.iter().filter(|l| l.service == name).count()
+        } else {
+            self.logs.len()
         }
     }
 
@@ -315,8 +360,19 @@ impl App {
                 self.status_message = Some("Reloading config...".to_string());
                 Some(TuiAction::Reload)
             }
+            KeyCode::PageUp => {
+                let height = 20;
+                let total = self.filtered_log_count();
+                self.log_scroll.scroll_up(height, total);
+                None
+            }
+            KeyCode::PageDown => {
+                self.log_scroll.scroll_down(20);
+                None
+            }
             KeyCode::Char('c') => {
                 self.logs.clear();
+                self.log_scroll.jump_to_bottom();
                 self.status_message = Some("Logs cleared".to_string());
                 None
             }

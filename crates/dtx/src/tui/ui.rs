@@ -184,11 +184,12 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
         app.logs.iter().collect()
     };
 
-    // Get the last N log lines
-    let skip_count = filtered_logs.len().saturating_sub(inner_height);
-    let visible_logs: Vec<Line> = filtered_logs
-        .into_iter()
-        .skip(skip_count)
+    // Get visible log window based on scroll offset
+    let total = filtered_logs.len();
+    let end = total.saturating_sub(app.log_scroll.offset_from_bottom);
+    let start = end.saturating_sub(inner_height);
+    let visible_logs: Vec<Line> = filtered_logs[start..end]
+        .iter()
         .map(|log| {
             let content_style = if is_error_line(&log.content) {
                 Style::default().fg(Color::Red)
@@ -200,9 +201,15 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
         })
         .collect();
 
-    // Title shows selected service name
+    // Title shows selected service name and scroll position
     let title = match selected_service {
-        Some(name) => format!(" Logs: {} ", name),
+        Some(name) => {
+            if app.log_scroll.offset_from_bottom > 0 {
+                format!(" Logs: {} [{}/{}] ", name, end, total)
+            } else {
+                format!(" Logs: {} ", name)
+            }
+        }
         None => " Logs ".to_string(),
     };
 
