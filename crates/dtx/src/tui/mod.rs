@@ -8,5 +8,6 @@
 mod app;
 mod logs;
 mod ui;
+pub mod wizard;
 
 pub use app::run_tui;

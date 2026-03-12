@@ -138,6 +138,7 @@ pub enum UiMode {
     Detail,
     Confirm { action: ConfirmAction, message: String },
     Help,
+    Wizard(Box<super::wizard::WizardState>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -396,6 +397,7 @@ impl App {
             UiMode::Detail => self.handle_key_detail(key),
             UiMode::Confirm { .. } => self.handle_key_confirm(key),
             UiMode::Help => self.handle_key_help(key),
+            UiMode::Wizard(_) => self.handle_key_wizard(key),
         }
     }
 
@@ -435,6 +437,31 @@ impl App {
                 self.config_changed = false;
                 self.status_message = Some("Reloading config...".to_string());
                 Some(TuiAction::Reload)
+            }
+            KeyCode::Char('a') => {
+                let available = self.service_names.clone();
+                self.mode =
+                    UiMode::Wizard(Box::new(super::wizard::WizardState::new_add(available)));
+                None
+            }
+            KeyCode::Char('e') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    let available: Vec<String> = self
+                        .service_names
+                        .iter()
+                        .filter(|n| **n != name)
+                        .cloned()
+                        .collect();
+                    let port = self.service_ports.get(&name).copied();
+                    self.mode = UiMode::Wizard(Box::new(super::wizard::WizardState::new_edit(
+                        &name,
+                        "",
+                        port,
+                        Vec::new(),
+                        available,
+                    )));
+                }
+                None
             }
             KeyCode::PageUp => {
                 let height = 20;
@@ -517,6 +544,36 @@ impl App {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn handle_key_wizard(&mut self, key: KeyCode) -> Option<TuiAction> {
+        use super::wizard::WizardAction;
+
+        if let UiMode::Wizard(ref mut state) = self.mode {
+            match state.handle_key(key) {
+                WizardAction::Continue => None,
+                WizardAction::Cancel => {
+                    self.mode = UiMode::Normal;
+                    self.status_message = Some("Wizard cancelled".to_string());
+                    None
+                }
+                WizardAction::Complete(result) => {
+                    let is_edit = state.is_edit;
+                    let original_name = state.original_name.clone();
+                    self.mode = UiMode::Normal;
+                    if is_edit {
+                        let name = original_name.unwrap_or_else(|| result.name.clone());
+                        self.status_message = Some(format!("Updating {}...", name));
+                        Some(TuiAction::EditService(name, result))
+                    } else {
+                        self.status_message = Some(format!("Adding {}...", result.name));
+                        Some(TuiAction::AddService(result))
+                    }
+                }
+            }
+        } else {
+            None
         }
     }
 
@@ -789,6 +846,8 @@ pub enum TuiAction {
     Start(String),
     Delete(String),
     Reload,
+    AddService(super::wizard::WizardResult),
+    EditService(String, super::wizard::WizardResult),
 }
 
 impl App {
@@ -1051,6 +1110,123 @@ pub async fn run_tui(
                             }
                         }
                         Err(e) => app.set_status(format!("Failed to load config: {}", e)),
+                    }
+                }
+                TuiAction::AddService(result) => {
+                    use dtx_core::config::schema::ResourceConfig;
+
+                    match ConfigStore::discover_and_load() {
+                        Ok(mut store) => {
+                            let mut rc = ResourceConfig {
+                                command: Some(result.command.clone()),
+                                port: result.port,
+                                ..Default::default()
+                            };
+                            if !result.deps.is_empty() {
+                                use dtx_core::config::schema::DependencyConfig;
+                                rc.depends_on = result
+                                    .deps
+                                    .iter()
+                                    .map(|d| DependencyConfig::Simple(d.clone()))
+                                    .collect();
+                            }
+                            if let Err(e) = store.add_resource(&result.name, rc) {
+                                app.set_status(format!("Failed to add: {}", e));
+                            } else if let Err(e) = store.save() {
+                                app.set_status(format!("Failed to save: {}", e));
+                            } else {
+                                let svc = dtx_core::model::Service {
+                                    name: result.name.clone(),
+                                    command: result.command.clone(),
+                                    package: None,
+                                    port: result.port,
+                                    working_dir: None,
+                                    environment: None,
+                                    depends_on: if result.deps.is_empty() {
+                                        None
+                                    } else {
+                                        Some(
+                                            result
+                                                .deps
+                                                .iter()
+                                                .map(|d| dtx_core::model::Dependency {
+                                                    service: d.clone(),
+                                                    condition:
+                                                        dtx_core::model::DependencyCondition::ProcessStarted,
+                                                })
+                                                .collect(),
+                                        )
+                                    },
+                                    health_check: None,
+                                    shutdown_command: None,
+                                    enabled: true,
+                                };
+                                let mut config = service_to_config(&svc, &project_dir);
+                                if let Some(ref env) = nix_env {
+                                    let user_env = std::mem::take(&mut config.environment);
+                                    config.environment = env.clone();
+                                    config.environment.extend(user_env);
+                                }
+                                orchestrator.add_resource(config);
+                                app.add_service(result.name.clone());
+                                if let Some(port) = result.port {
+                                    app.set_port(&result.name, port);
+                                }
+
+                                let rid = ResourceId::new(&result.name);
+                                if let Some(resource) = orchestrator.get_resource(&rid) {
+                                    let mut resource = resource.write().await;
+                                    let ctx = Context::new();
+                                    if let Err(e) = resource.start(&ctx).await {
+                                        app.set_status(format!(
+                                            "Added {} but failed to start: {}",
+                                            result.name, e
+                                        ));
+                                    } else {
+                                        app.set_status(format!(
+                                            "Added and started {}",
+                                            result.name
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            app.set_status(format!("Failed to load config: {}", e))
+                        }
+                    }
+                }
+                TuiAction::EditService(original_name, result) => {
+                    match ConfigStore::discover_and_load() {
+                        Ok(mut store) => {
+                            let _ = store.remove_resource(&original_name);
+                            let mut rc = dtx_core::config::schema::ResourceConfig {
+                                command: Some(result.command.clone()),
+                                port: result.port,
+                                ..Default::default()
+                            };
+                            if !result.deps.is_empty() {
+                                use dtx_core::config::schema::DependencyConfig;
+                                rc.depends_on = result
+                                    .deps
+                                    .iter()
+                                    .map(|d| DependencyConfig::Simple(d.clone()))
+                                    .collect();
+                            }
+                            if let Err(e) = store.add_resource(&result.name, rc) {
+                                app.set_status(format!("Failed to update: {}", e));
+                            } else if let Err(e) = store.save() {
+                                app.set_status(format!("Failed to save: {}", e));
+                            } else {
+                                app.set_status(format!(
+                                    "Updated {} — restart to apply",
+                                    original_name
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            app.set_status(format!("Failed to load config: {}", e))
+                        }
                     }
                 }
                 TuiAction::Reload => match ConfigStore::discover_and_load() {

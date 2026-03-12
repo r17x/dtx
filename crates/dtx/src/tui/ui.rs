@@ -33,6 +33,10 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
     if matches!(app.mode, UiMode::Help) {
         draw_help_overlay(f, f.area());
     }
+
+    if let UiMode::Wizard(ref state) = app.mode {
+        draw_wizard(f, state, f.area());
+    }
 }
 
 /// Draw the header.
@@ -425,6 +429,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         UiMode::Help => vec![
             ("?/Esc", "Close"),
         ],
+        UiMode::Wizard(_) => vec![
+            ("Enter", "Next"),
+            ("Esc", "Back"),
+        ],
     };
 
     let mut spans = Vec::new();
@@ -565,4 +573,148 @@ fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {
     );
 
     f.render_widget(dialog, dialog_area);
+}
+
+fn draw_wizard(f: &mut Frame, state: &super::wizard::WizardState, area: Rect) {
+    use super::wizard::WizardStep;
+
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 16u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let overlay_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, overlay_area);
+
+    let (step_num, total_steps) = state.step_number();
+    let title = if state.is_edit {
+        format!(" Edit Service — Step {}/{} ", step_num, total_steps)
+    } else {
+        format!(" Add Service — Step {}/{} ", step_num, total_steps)
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::raw(""));
+
+    match state.step {
+        WizardStep::Name | WizardStep::Command | WizardStep::Port => {
+            lines.push(Line::from(vec![Span::styled(
+                format!(" {}: ", state.step_label()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(vec![
+                Span::raw(" > "),
+                Span::styled(&state.input_buffer, Style::default().fg(Color::White)),
+                Span::styled("_", Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        WizardStep::Deps => {
+            lines.push(Line::from(Span::styled(
+                " Select dependencies (Space to toggle):",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for (i, svc) in state.available_services.iter().enumerate() {
+                let selected = state.dep_selected.contains(svc);
+                let marker = if selected { "[x]" } else { "[ ]" };
+                let style = if i == state.selected_dep_index {
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} ", marker),
+                        Style::default().fg(if selected {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::styled(svc, style),
+                ]));
+            }
+        }
+        WizardStep::Confirm => {
+            lines.push(Line::from(Span::styled(
+                " Review:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("  Name:    ", Style::default().fg(Color::DarkGray)),
+                Span::raw(&state.name),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Command: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(&state.command),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Port:    ", Style::default().fg(Color::DarkGray)),
+                Span::raw(if state.port.is_empty() {
+                    "-"
+                } else {
+                    &state.port
+                }),
+            ]));
+            if !state.deps.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("  Deps:    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(state.deps.join(", ")),
+                ]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "  [Enter]",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" Confirm  "),
+                Span::styled(
+                    "[Esc]",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" Back"),
+            ]));
+        }
+    }
+
+    // Show error if any
+    if let Some(ref err) = state.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            format!("  Error: {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    // Navigation hint
+    if !matches!(state.step, WizardStep::Confirm) {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("  [Enter]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Next  "),
+            Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Back/Cancel"),
+        ]));
+    }
+
+    let wizard = Paragraph::new(lines).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
+
+    f.render_widget(wizard, overlay_area);
 }
