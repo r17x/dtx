@@ -461,6 +461,24 @@ impl App {
                 self.mode = UiMode::Filter { query: initial, cursor };
                 None
             }
+            KeyCode::Char('S') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    if matches!(self.service_states.get(&name),
+                        Some(DisplayState::Stopped | DisplayState::Completed { .. } | DisplayState::Failed { .. })) {
+                        self.status_message = Some(format!("Starting {}...", name));
+                        return Some(TuiAction::Start(name));
+                    }
+                }
+                None
+            }
+            KeyCode::Char('g') => {
+                self.selected = 0;
+                None
+            }
+            KeyCode::Char('G') => {
+                self.selected = self.service_names.len().saturating_sub(1);
+                None
+            }
             KeyCode::Enter => {
                 self.gather_detail();
                 self.mode = UiMode::Detail;
@@ -610,6 +628,16 @@ impl App {
                 }
                 None
             }
+            KeyCode::Char('S') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    if matches!(self.service_states.get(&name),
+                        Some(DisplayState::Stopped | DisplayState::Completed { .. } | DisplayState::Failed { .. })) {
+                        self.status_message = Some(format!("Starting {}...", name));
+                        return Some(TuiAction::Start(name));
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -704,6 +732,7 @@ impl App {
 pub enum TuiAction {
     Restart(String),
     Stop(String),
+    Start(String),
     Reload,
 }
 
@@ -924,6 +953,19 @@ pub async fn run_tui(
                         match resource.stop(&ctx).await {
                             Ok(()) => app.set_status(format!("Stopped {}", name)),
                             Err(e) => app.set_status(format!("Failed: {}", e)),
+                        }
+                    } else {
+                        app.set_status(format!("Resource {} not found", name));
+                    }
+                }
+                TuiAction::Start(name) => {
+                    let id = ResourceId::new(&name);
+                    if let Some(resource) = orchestrator.get_resource(&id) {
+                        let mut resource = resource.write().await;
+                        let ctx = Context::new();
+                        match resource.start(&ctx).await {
+                            Ok(()) => app.set_status(format!("Started {}", name)),
+                            Err(e) => app.set_status(format!("Failed to start: {}", e)),
                         }
                     } else {
                         app.set_status(format!("Resource {} not found", name));
