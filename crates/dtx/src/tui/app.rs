@@ -42,6 +42,8 @@ pub struct ServiceDisplayInfo {
     pub name: String,
     pub state: DisplayState,
     pub restarts: u32,
+    pub health: DisplayHealth,
+    pub port: Option<u16>,
 }
 
 /// Display-friendly state (simplified from ResourceState).
@@ -125,6 +127,8 @@ pub struct App {
     pub config_changed: bool,
     /// Health states per service (updated from health check events).
     health_states: HashMap<String, DisplayHealth>,
+    /// Port numbers per service.
+    service_ports: HashMap<String, u16>,
     /// Current UI mode.
     pub mode: UiMode,
 }
@@ -150,8 +154,14 @@ impl App {
             status_message: None,
             config_changed: false,
             health_states,
+            service_ports: HashMap::new(),
             mode: UiMode::Normal,
         }
+    }
+
+    /// Set port for a service.
+    pub fn set_port(&mut self, name: &str, port: u16) {
+        self.service_ports.insert(name.to_string(), port);
     }
 
     /// Get service info for display.
@@ -166,6 +176,8 @@ impl App {
                     .cloned()
                     .unwrap_or(DisplayState::Pending),
                 restarts: *self.restart_counts.get(name).unwrap_or(&0),
+                health: self.health(name).clone(),
+                port: self.service_ports.get(name).copied(),
             })
             .collect()
     }
@@ -455,6 +467,12 @@ pub async fn run_tui(
 
     // Create app
     let mut app = App::new(service_names);
+
+    for service in &enabled_services {
+        if let Some(port) = service.port {
+            app.set_port(&service.name, port);
+        }
+    }
 
     if !start_result.failed.is_empty() {
         let failed_names: Vec<_> = start_result

@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, DisplayState, ServiceDisplayInfo};
+use super::app::{App, DisplayHealth, DisplayState, ServiceDisplayInfo};
 
 /// Main draw function with service infos.
 pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo]) {
@@ -96,10 +96,25 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
                 String::new()
             };
 
+            let health_bg = match &svc.health {
+                DisplayHealth::Healthy if matches!(svc.state, DisplayState::Running { .. }) => {
+                    Some(Color::Rgb(20, 40, 20))
+                }
+                DisplayHealth::Unhealthy { .. } => Some(Color::Rgb(50, 20, 20)),
+                _ => None,
+            };
+
+            let port_span = match svc.port {
+                Some(p) => Span::styled(format!(" :{}", p), Style::default().fg(Color::DarkGray)),
+                None => Span::raw(""),
+            };
+
             let style = if i == app.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
+            } else if let Some(bg) = health_bg {
+                Style::default().bg(bg)
             } else {
                 Style::default()
             };
@@ -107,6 +122,7 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
             let content = Line::from(vec![
                 Span::styled(format!(" {} ", indicator), Style::default().fg(color)),
                 Span::styled(&svc.name, style),
+                port_span,
                 Span::styled(
                     format!(" [{}]{}", state_label, restart_info),
                     Style::default().fg(Color::DarkGray),
