@@ -22,7 +22,7 @@ use dtx_core::resource::{Context, Resource, ResourceId, ResourceState};
 use dtx_core::store::ConfigStore;
 use dtx_process::{ProcessResourceConfig, ResourceOrchestrator};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,10 +142,8 @@ pub struct App {
     service_states: HashMap<String, DisplayState>,
     /// Restart counts per service.
     restart_counts: HashMap<String, u32>,
-    /// Collected logs for display.
-    pub logs: VecDeque<DisplayLog>,
-    /// Maximum logs to keep.
-    max_logs: usize,
+    /// File-backed log store with in-memory recent buffer.
+    pub log_store: super::logs::LogStore,
     /// Currently selected service index.
     pub selected: usize,
     /// Whether the app should quit.
@@ -165,7 +163,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(service_names: Vec<String>) -> Self {
+    pub fn new(service_names: Vec<String>, log_dir: Option<PathBuf>) -> Self {
         let mut service_states = HashMap::new();
         let mut restart_counts = HashMap::new();
         for name in &service_names {
@@ -178,8 +176,10 @@ impl App {
             service_names,
             service_states,
             restart_counts,
-            logs: VecDeque::with_capacity(500),
-            max_logs: 500,
+            log_store: match log_dir {
+                Some(dir) => super::logs::LogStore::new(dir, 2000),
+                None => super::logs::LogStore::memory_only(2000),
+            },
             selected: 0,
             should_quit: false,
             status_message: None,
@@ -255,15 +255,13 @@ impl App {
                 self.restart_counts.insert(name.clone(), attempt);
                 self.service_states.insert(name, DisplayState::Starting);
             }
-            LifecycleEvent::Log { id, line, .. } => {
-                self.logs.push_back(DisplayLog {
+            LifecycleEvent::Log {
+                id, stream, line, ..
+            } => {
+                self.log_store.append(DisplayLog {
                     service: id.to_string(),
                     content: line,
                 });
-
-                while self.logs.len() > self.max_logs {
-                    self.logs.pop_front();
-                }
 
                 if self.log_scroll.following {
                     self.log_scroll.offset_from_bottom = 0;
@@ -304,11 +302,7 @@ impl App {
 
     /// Count filtered logs for the currently selected service.
     pub fn filtered_log_count(&self) -> usize {
-        if let Some(name) = self.selected_service() {
-            self.logs.iter().filter(|l| l.service == name).count()
-        } else {
-            self.logs.len()
-        }
+        self.log_store.filtered_count(self.selected_service())
     }
 
     /// Get currently selected service name.
@@ -371,7 +365,7 @@ impl App {
                 None
             }
             KeyCode::Char('c') => {
-                self.logs.clear();
+                self.log_store.clear(None);
                 self.log_scroll.jump_to_bottom();
                 self.status_message = Some("Logs cleared".to_string());
                 None
@@ -522,7 +516,9 @@ pub async fn run_tui(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Create app
-    let mut app = App::new(service_names);
+    let dtx_dir = project_dir.join(".dtx");
+    let log_dir = dtx_dir.join("logs");
+    let mut app = App::new(service_names, Some(log_dir));
 
     for service in &enabled_services {
         if let Some(port) = service.port {

@@ -6,6 +6,7 @@
 //! - Keyboard controls for service management
 
 mod app;
+mod logs;
 mod ui;
 
 pub use app::run_tui;

@@ -174,21 +174,15 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     // Calculate how many lines we can show
     let inner_height = area.height.saturating_sub(2) as usize;
 
-    // Filter logs by selected service
-    let filtered_logs: Vec<_> = if let Some(service_name) = selected_service {
-        app.logs
-            .iter()
-            .filter(|log| log.service == service_name)
-            .collect()
-    } else {
-        app.logs.iter().collect()
-    };
-
-    // Get visible log window based on scroll offset
-    let total = filtered_logs.len();
+    // Get visible logs from LogStore
+    let total = app.log_store.filtered_count(selected_service);
+    let visible = app.log_store.get_visible(
+        selected_service,
+        app.log_scroll.offset_from_bottom,
+        inner_height,
+    );
     let end = total.saturating_sub(app.log_scroll.offset_from_bottom);
-    let start = end.saturating_sub(inner_height);
-    let visible_logs: Vec<Line> = filtered_logs[start..end]
+    let visible_logs: Vec<Line> = visible
         .iter()
         .map(|log| {
             let content_style = if is_error_line(&log.content) {
