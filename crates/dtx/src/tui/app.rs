@@ -87,6 +87,15 @@ impl DisplayState {
     }
 }
 
+/// Health status for display (derived from health check events).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum DisplayHealth {
+    #[default]
+    Unknown,
+    Healthy,
+    Unhealthy { reason: String },
+}
+
 /// TUI interaction mode.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum UiMode {
@@ -114,6 +123,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// Config changed flag (set by ConfigChanged event).
     pub config_changed: bool,
+    /// Health states per service (updated from health check events).
+    health_states: HashMap<String, DisplayHealth>,
     /// Current UI mode.
     pub mode: UiMode,
 }
@@ -126,6 +137,7 @@ impl App {
             service_states.insert(name.clone(), DisplayState::Pending);
             restart_counts.insert(name.clone(), 0);
         }
+        let health_states = service_names.iter().map(|n| (n.clone(), DisplayHealth::Unknown)).collect();
 
         Self {
             service_names,
@@ -137,6 +149,7 @@ impl App {
             should_quit: false,
             status_message: None,
             config_changed: false,
+            health_states,
             mode: UiMode::Normal,
         }
     }
@@ -212,9 +225,13 @@ impl App {
                 self.config_changed = true;
                 self.status_message = Some("Config changed — press 'a' to reload".to_string());
             }
-            LifecycleEvent::HealthCheckPassed { .. }
-            | LifecycleEvent::HealthCheckFailed { .. }
-            | LifecycleEvent::DependencyWaiting { .. }
+            LifecycleEvent::HealthCheckPassed { id, .. } => {
+                self.health_states.insert(id.to_string(), DisplayHealth::Healthy);
+            }
+            LifecycleEvent::HealthCheckFailed { id, reason, .. } => {
+                self.health_states.insert(id.to_string(), DisplayHealth::Unhealthy { reason });
+            }
+            LifecycleEvent::DependencyWaiting { .. }
             | LifecycleEvent::DependencyResolved { .. } => {}
         }
     }
@@ -293,6 +310,12 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Get health status for a service.
+    pub fn health(&self, name: &str) -> &DisplayHealth {
+        static UNKNOWN: DisplayHealth = DisplayHealth::Unknown;
+        self.health_states.get(name).unwrap_or(&UNKNOWN)
     }
 
     /// Set status message.
