@@ -136,6 +136,12 @@ pub enum UiMode {
     Search { query: String, cursor: usize },
     Filter { query: String, cursor: usize },
     Detail,
+    Confirm { action: ConfirmAction, message: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfirmAction {
+    Delete(String),
 }
 
 /// Search state for log search results.
@@ -387,6 +393,7 @@ impl App {
             UiMode::Search { .. } => self.handle_key_search(key),
             UiMode::Filter { .. } => self.handle_key_filter(key),
             UiMode::Detail => self.handle_key_detail(key),
+            UiMode::Confirm { .. } => self.handle_key_confirm(key),
         }
     }
 
@@ -479,9 +486,40 @@ impl App {
                 self.selected = self.service_names.len().saturating_sub(1);
                 None
             }
+            KeyCode::Char('d') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    self.mode = UiMode::Confirm {
+                        action: ConfirmAction::Delete(name.clone()),
+                        message: format!("Delete service '{}'?", name),
+                    };
+                }
+                None
+            }
             KeyCode::Enter => {
                 self.gather_detail();
                 self.mode = UiMode::Detail;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_key_confirm(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let UiMode::Confirm { action, .. } = std::mem::replace(&mut self.mode, UiMode::Normal) {
+                    match action {
+                        ConfirmAction::Delete(name) => {
+                            self.status_message = Some(format!("Deleting {}...", name));
+                            return Some(TuiAction::Delete(name));
+                        }
+                    }
+                }
+                None
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.mode = UiMode::Normal;
+                self.status_message = Some("Cancelled".to_string());
                 None
             }
             _ => None,
@@ -733,6 +771,7 @@ pub enum TuiAction {
     Restart(String),
     Stop(String),
     Start(String),
+    Delete(String),
     Reload,
 }
 
@@ -969,6 +1008,33 @@ pub async fn run_tui(
                         }
                     } else {
                         app.set_status(format!("Resource {} not found", name));
+                    }
+                }
+                TuiAction::Delete(name) => {
+                    // Stop the service first if running
+                    let id = ResourceId::new(&name);
+                    if let Some(resource) = orchestrator.get_resource(&id) {
+                        let mut resource = resource.write().await;
+                        let ctx = Context::new();
+                        let _ = resource.stop(&ctx).await;
+                    }
+
+                    // Remove from config store
+                    match ConfigStore::discover_and_load() {
+                        Ok(mut store) => {
+                            match store.remove_resource(&name) {
+                                Ok(_) => {
+                                    if let Err(e) = store.save() {
+                                        app.set_status(format!("Failed to save: {}", e));
+                                    } else {
+                                        app.remove_service(&name);
+                                        app.set_status(format!("Deleted {}", name));
+                                    }
+                                }
+                                Err(e) => app.set_status(format!("Failed to delete: {}", e)),
+                            }
+                        }
+                        Err(e) => app.set_status(format!("Failed to load config: {}", e)),
                     }
                 }
                 TuiAction::Reload => match ConfigStore::discover_and_load() {

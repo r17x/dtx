@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -24,6 +24,11 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
     draw_header(f, chunks[0]);
     draw_main(f, app, service_infos, chunks[1]);
     draw_footer(f, app, chunks[2]);
+
+    // Render confirm dialog overlay if in Confirm mode
+    if let UiMode::Confirm { ref message, .. } = app.mode {
+        draw_confirm_dialog(f, message, f.area());
+    }
 }
 
 /// Draw the header.
@@ -417,4 +422,34 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     );
 
     f.render_widget(footer, area);
+}
+
+fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {
+    let width = (message.len() as u16 + 6).min(area.width.saturating_sub(4));
+    let height = 5;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![Span::raw(format!(" {} ", message))]),
+        Line::from(vec![
+            Span::styled(" [y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" Yes  "),
+            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" No "),
+        ]),
+    ];
+
+    let dialog = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Confirm ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+
+    f.render_widget(dialog, dialog_area);
 }
