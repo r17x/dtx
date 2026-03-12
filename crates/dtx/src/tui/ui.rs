@@ -175,12 +175,20 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     let inner_height = area.height.saturating_sub(2) as usize;
 
     // Get visible logs from LogStore
-    let total = app.log_store.filtered_count(selected_service);
-    let visible = app.log_store.get_visible(
-        selected_service,
-        app.log_scroll.offset_from_bottom,
-        inner_height,
-    );
+    let total = app.filtered_log_count();
+    let visible = match &app.active_filter {
+        Some(filter) => app.log_store.get_visible_filtered(
+            selected_service,
+            filter,
+            app.log_scroll.offset_from_bottom,
+            inner_height,
+        ),
+        None => app.log_store.get_visible(
+            selected_service,
+            app.log_scroll.offset_from_bottom,
+            inner_height,
+        ),
+    };
     let end = total.saturating_sub(app.log_scroll.offset_from_bottom);
     let search_query = app.search_state.as_ref().map(|s| s.query.to_lowercase());
 
@@ -222,10 +230,15 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     // Title shows selected service name and scroll position
     let title = match selected_service {
         Some(name) => {
+            let mut t = format!(" Logs: {} ", name);
+            if let Some(ref filter) = app.active_filter {
+                t = format!(" Logs: {} [filter: {}] ", name, filter);
+            }
             if app.log_scroll.offset_from_bottom > 0 {
-                format!(" Logs: {} [{}/{}] ", name, end, total)
+                t = format!("{} [{}/{}] ", t.trim(), end, total);
+                format!(" {} ", t.trim())
             } else {
-                format!(" Logs: {} ", name)
+                t
             }
         }
         None => " Logs ".to_string(),
@@ -254,6 +267,22 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ]);
         f.render_widget(Paragraph::new(search_text), search_area);
+    }
+
+    // Render filter bar if in filter mode
+    if let UiMode::Filter { ref query, .. } = app.mode {
+        let filter_area = Rect {
+            x: area.x + 1,
+            y: area.y + area.height.saturating_sub(2),
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        let filter_text = Line::from(vec![
+            Span::styled("filter: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::raw(query.as_str()),
+            Span::styled("█", Style::default().fg(Color::Magenta)),
+        ]);
+        f.render_widget(Paragraph::new(filter_text), filter_area);
     }
 }
 

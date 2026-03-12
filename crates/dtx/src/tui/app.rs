@@ -134,6 +134,7 @@ pub enum UiMode {
     #[default]
     Normal,
     Search { query: String, cursor: usize },
+    Filter { query: String, cursor: usize },
 }
 
 /// Search state for log search results.
@@ -171,6 +172,8 @@ pub struct App {
     pub log_scroll: LogScroll,
     /// Search state for log search.
     pub search_state: Option<SearchState>,
+    /// Active log filter (persistent text filter).
+    pub active_filter: Option<String>,
 }
 
 impl App {
@@ -200,6 +203,7 @@ impl App {
             mode: UiMode::Normal,
             log_scroll: LogScroll::new(),
             search_state: None,
+            active_filter: None,
         }
     }
 
@@ -315,7 +319,11 @@ impl App {
 
     /// Count filtered logs for the currently selected service.
     pub fn filtered_log_count(&self) -> usize {
-        self.log_store.filtered_count(self.selected_service())
+        let service = self.selected_service();
+        match &self.active_filter {
+            Some(filter) => self.log_store.filtered_count_with_predicate(service, filter),
+            None => self.log_store.filtered_count(service),
+        }
     }
 
     /// Get currently selected service name.
@@ -328,6 +336,7 @@ impl App {
         match &self.mode {
             UiMode::Normal => self.handle_key_normal(key),
             UiMode::Search { .. } => self.handle_key_search(key),
+            UiMode::Filter { .. } => self.handle_key_filter(key),
         }
     }
 
@@ -396,6 +405,12 @@ impl App {
                 self.prev_match();
                 None
             }
+            KeyCode::Char('F') => {
+                let initial = self.active_filter.clone().unwrap_or_default();
+                let cursor = initial.len();
+                self.mode = UiMode::Filter { query: initial, cursor };
+                None
+            }
             _ => None,
         }
     }
@@ -434,6 +449,63 @@ impl App {
             }
             KeyCode::Right => {
                 if let UiMode::Search { ref query, ref mut cursor } = self.mode {
+                    if *cursor < query.len() {
+                        *cursor += 1;
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_key_filter(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Enter => {
+                if let UiMode::Filter { ref query, .. } = self.mode {
+                    if query.is_empty() {
+                        self.active_filter = None;
+                        self.status_message = Some("Filter cleared".to_string());
+                    } else {
+                        self.active_filter = Some(query.clone());
+                        self.status_message = Some(format!("Filter: {}", query));
+                    }
+                }
+                self.log_scroll.jump_to_bottom();
+                self.mode = UiMode::Normal;
+                None
+            }
+            KeyCode::Esc => {
+                self.active_filter = None;
+                self.status_message = Some("Filter cleared".to_string());
+                self.log_scroll.jump_to_bottom();
+                self.mode = UiMode::Normal;
+                None
+            }
+            KeyCode::Backspace => {
+                if let UiMode::Filter { ref mut query, ref mut cursor } = self.mode {
+                    if *cursor > 0 {
+                        query.remove(*cursor - 1);
+                        *cursor -= 1;
+                    }
+                }
+                None
+            }
+            KeyCode::Char(c) => {
+                if let UiMode::Filter { ref mut query, ref mut cursor } = self.mode {
+                    query.insert(*cursor, c);
+                    *cursor += 1;
+                }
+                None
+            }
+            KeyCode::Left => {
+                if let UiMode::Filter { ref mut cursor, .. } = self.mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                None
+            }
+            KeyCode::Right => {
+                if let UiMode::Filter { ref query, ref mut cursor } = self.mode {
                     if *cursor < query.len() {
                         *cursor += 1;
                     }

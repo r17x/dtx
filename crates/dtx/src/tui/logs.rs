@@ -168,6 +168,44 @@ impl LogStore {
         }
     }
 
+    /// Count of logs in recent buffer matching a text filter.
+    pub fn filtered_count_with_predicate(&self, service: Option<&str>, filter: &str) -> usize {
+        let filter_lower = filter.to_lowercase();
+        match service {
+            Some(name) => self.recent.iter()
+                .filter(|l| l.service == name && l.content.to_lowercase().contains(&filter_lower))
+                .count(),
+            None => self.recent.iter()
+                .filter(|l| l.content.to_lowercase().contains(&filter_lower))
+                .count(),
+        }
+    }
+
+    /// Get visible logs filtered by a text predicate.
+    pub fn get_visible_filtered(
+        &self,
+        service: Option<&str>,
+        filter: &str,
+        offset_from_bottom: usize,
+        height: usize,
+    ) -> Vec<&DisplayLog> {
+        let filter_lower = filter.to_lowercase();
+        let filtered: Vec<&DisplayLog> = if let Some(name) = service {
+            self.recent.iter()
+                .filter(|l| l.service == name && l.content.to_lowercase().contains(&filter_lower))
+                .collect()
+        } else {
+            self.recent.iter()
+                .filter(|l| l.content.to_lowercase().contains(&filter_lower))
+                .collect()
+        };
+
+        let total = filtered.len();
+        let end = total.saturating_sub(offset_from_bottom);
+        let start = end.saturating_sub(height);
+        filtered[start..end].to_vec()
+    }
+
     /// Clear logs for a service (or all).
     pub fn clear(&mut self, service: Option<&str>) {
         match service {
