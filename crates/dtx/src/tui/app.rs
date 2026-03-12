@@ -135,6 +135,7 @@ pub enum UiMode {
     Normal,
     Search { query: String, cursor: usize },
     Filter { query: String, cursor: usize },
+    Detail,
 }
 
 /// Search state for log search results.
@@ -142,6 +143,19 @@ pub struct SearchState {
     pub query: String,
     pub matches: Vec<usize>,
     pub current_match: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceDetail {
+    pub name: String,
+    pub state: DisplayState,
+    pub health: DisplayHealth,
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub uptime: Option<Duration>,
+    pub restart_count: u32,
+    pub command: Option<String>,
+    pub dependencies: Vec<String>,
 }
 
 /// TUI application state.
@@ -174,6 +188,10 @@ pub struct App {
     pub search_state: Option<SearchState>,
     /// Active log filter (persistent text filter).
     pub active_filter: Option<String>,
+    /// Service detail view data.
+    pub detail: Option<ServiceDetail>,
+    /// Track when services started (for uptime).
+    started_at: HashMap<String, Instant>,
 }
 
 impl App {
@@ -204,6 +222,8 @@ impl App {
             log_scroll: LogScroll::new(),
             search_state: None,
             active_filter: None,
+            detail: None,
+            started_at: HashMap::new(),
         }
     }
 
@@ -239,6 +259,7 @@ impl App {
             }
             LifecycleEvent::Running { id, pid, .. } => {
                 let name = id.to_string();
+                self.started_at.entry(name.clone()).or_insert_with(Instant::now);
                 self.service_states.insert(
                     name,
                     DisplayState::Running {
@@ -256,15 +277,17 @@ impl App {
                 let name = id.to_string();
                 if let Some(code) = exit_code {
                     self.service_states
-                        .insert(name, DisplayState::Completed { exit_code: code });
+                        .insert(name.clone(), DisplayState::Completed { exit_code: code });
                 } else {
-                    self.service_states.insert(name, DisplayState::Stopped);
+                    self.service_states.insert(name.clone(), DisplayState::Stopped);
                 }
+                self.started_at.remove(&name);
             }
             LifecycleEvent::Failed { id, error, .. } => {
                 let name = id.to_string();
                 self.service_states
-                    .insert(name, DisplayState::Failed { error: Some(error) });
+                    .insert(name.clone(), DisplayState::Failed { error: Some(error) });
+                self.started_at.remove(&name);
             }
             LifecycleEvent::Restarting { id, attempt, .. } => {
                 let name = id.to_string();
@@ -331,12 +354,39 @@ impl App {
         self.service_names.get(self.selected).map(|s| s.as_str())
     }
 
+    /// Gather detail info for the currently selected service.
+    pub fn gather_detail(&mut self) {
+        let name = match self.selected_service() {
+            Some(n) => n.to_string(),
+            None => return,
+        };
+        let state = self.service_states.get(&name).cloned().unwrap_or(DisplayState::Pending);
+        let pid = match &state {
+            DisplayState::Running { pid } => Some(*pid),
+            _ => None,
+        };
+        let uptime = self.started_at.get(&name).map(|t| t.elapsed());
+
+        self.detail = Some(ServiceDetail {
+            name: name.clone(),
+            state,
+            health: self.health(&name).clone(),
+            pid,
+            port: self.service_ports.get(&name).copied(),
+            uptime,
+            restart_count: *self.restart_counts.get(&name).unwrap_or(&0),
+            command: None,
+            dependencies: Vec::new(),
+        });
+    }
+
     /// Handle keyboard input (returns action to take).
     pub fn handle_key(&mut self, key: KeyCode) -> Option<TuiAction> {
         match &self.mode {
             UiMode::Normal => self.handle_key_normal(key),
             UiMode::Search { .. } => self.handle_key_search(key),
             UiMode::Filter { .. } => self.handle_key_filter(key),
+            UiMode::Detail => self.handle_key_detail(key),
         }
     }
 
@@ -409,6 +459,11 @@ impl App {
                 let initial = self.active_filter.clone().unwrap_or_default();
                 let cursor = initial.len();
                 self.mode = UiMode::Filter { query: initial, cursor };
+                None
+            }
+            KeyCode::Enter => {
+                self.gather_detail();
+                self.mode = UiMode::Detail;
                 None
             }
             _ => None,
@@ -509,6 +564,49 @@ impl App {
                     if *cursor < query.len() {
                         *cursor += 1;
                     }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_key_detail(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Esc => {
+                self.detail = None;
+                self.mode = UiMode::Normal;
+                None
+            }
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    self.gather_detail();
+                }
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.selected < self.service_names.len().saturating_sub(1) {
+                    self.selected += 1;
+                    self.gather_detail();
+                }
+                None
+            }
+            KeyCode::Char('r') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    self.status_message = Some(format!("Restarting {}...", name));
+                    return Some(TuiAction::Restart(name));
+                }
+                None
+            }
+            KeyCode::Char('s') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    self.status_message = Some(format!("Stopping {}...", name));
+                    return Some(TuiAction::Stop(name));
                 }
                 None
             }

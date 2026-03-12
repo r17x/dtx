@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, DisplayHealth, DisplayState, ServiceDisplayInfo, UiMode};
+use super::app::{App, DisplayHealth, DisplayState, ServiceDetail, ServiceDisplayInfo, UiMode};
 
 /// Main draw function with service infos.
 pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo]) {
@@ -54,16 +54,28 @@ fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], are
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(30), // Services
-            Constraint::Percentage(70), // Logs
+            Constraint::Percentage(30),
+            Constraint::Percentage(70),
         ])
         .split(area);
 
-    // Get selected service name for log filtering
     let selected_service = service_infos.get(app.selected).map(|s| s.name.as_str());
 
     draw_services(f, app, service_infos, chunks[0]);
-    draw_logs(f, app, selected_service, chunks[1]);
+
+    if let (UiMode::Detail, Some(ref detail)) = (&app.mode, &app.detail) {
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(5),
+            ])
+            .split(chunks[1]);
+        draw_detail(f, detail, right_chunks[0]);
+        draw_logs(f, app, selected_service, right_chunks[1]);
+    } else {
+        draw_logs(f, app, selected_service, chunks[1]);
+    }
 }
 
 /// Draw the service list.
@@ -167,6 +179,88 @@ fn is_error_line(content: &str) -> bool {
         || contains_ci(content, " fatal:")
         || contains_ci(content, "level=error")
         || contains_ci(content, "level=fatal")
+}
+
+/// Draw the service detail panel.
+fn draw_detail(f: &mut Frame, detail: &ServiceDetail, area: Rect) {
+    let state_str = match &detail.state {
+        DisplayState::Running { pid } => format!("Running (PID {})", pid),
+        DisplayState::Starting => "Starting".to_string(),
+        DisplayState::Pending => "Pending".to_string(),
+        DisplayState::Stopped => "Stopped".to_string(),
+        DisplayState::Completed { exit_code } => format!("Completed (exit {})", exit_code),
+        DisplayState::Failed { error } => {
+            format!("Failed{}", error.as_ref().map(|e| format!(": {}", e)).unwrap_or_default())
+        }
+    };
+
+    let health_str = match &detail.health {
+        DisplayHealth::Unknown => "Unknown".to_string(),
+        DisplayHealth::Healthy => "Healthy".to_string(),
+        DisplayHealth::Unhealthy { reason } => format!("Unhealthy: {}", reason),
+    };
+
+    let (health_style, health_symbol) = match &detail.health {
+        DisplayHealth::Healthy => (Style::default().fg(Color::Green), "♥"),
+        DisplayHealth::Unhealthy { .. } => (Style::default().fg(Color::Red), "✗"),
+        DisplayHealth::Unknown => (Style::default().fg(Color::DarkGray), "?"),
+    };
+
+    let uptime_str = detail.uptime.map(|d| {
+        let secs = d.as_secs();
+        if secs >= 3600 {
+            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        } else if secs >= 60 {
+            format!("{}m {}s", secs / 60, secs % 60)
+        } else {
+            format!("{}s", secs)
+        }
+    }).unwrap_or_else(|| "-".to_string());
+
+    let port_str = detail.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" State:   ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&state_str),
+        ]),
+        Line::from(vec![
+            Span::styled(" Health:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{} {}", health_symbol, health_str), health_style),
+        ]),
+        Line::from(vec![
+            Span::styled(" Port:    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&port_str),
+            Span::styled("    Uptime: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&uptime_str),
+        ]),
+        Line::from(vec![
+            Span::styled(" Restart: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{}", detail.restart_count)),
+        ]),
+    ];
+
+    if let Some(ref cmd) = detail.command {
+        lines.push(Line::from(vec![
+            Span::styled(" Command: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(cmd),
+        ]));
+    }
+    if !detail.dependencies.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" Deps:    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(detail.dependencies.join(", ")),
+        ]));
+    }
+
+    let title = format!(" {} — Detail ", detail.name);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
 }
 
 /// Draw the log panel (filtered by selected service).
