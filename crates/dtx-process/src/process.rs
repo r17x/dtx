@@ -75,7 +75,60 @@ impl RestartState {
     }
 }
 
-/// Drain available lines from an async reader without blocking.
+/// Strip ANSI escape sequences and normalize control characters.
+///
+/// Handles CSI sequences (`ESC[...X`), OSC sequences (`ESC]...ST`),
+/// simple two-byte escapes (`ESC X`), and carriage returns (keeps only
+/// content after the last `\r` to simulate terminal overwrite behavior).
+fn strip_ansi(s: &str) -> String {
+    // Handle \r first: keep only content after the last \r per line
+    let s = if let Some(pos) = s.rfind('\r') {
+        &s[pos + 1..]
+    } else {
+        s
+    };
+
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    // CSI: consume until final byte (0x40..=0x7E)
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: consume until ST (ESC \ or BEL)
+                    let mut prev = '\0';
+                    for c in chars.by_ref() {
+                        if c == '\x07' || (prev == '\x1b' && c == '\\') {
+                            break;
+                        }
+                        prev = c;
+                    }
+                }
+                Some(_) => {} // two-byte escape, already consumed
+                None => break,
+            }
+        } else if c.is_ascii_control() && c != '\t' && c != '\n' {
+            continue;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Drain available complete lines from an async reader without blocking.
+///
+/// Only reads when a complete line (`\n`) is available in the buffer.
+/// This prevents partial reads from consuming data that would be lost
+/// on the next call (since `read_line` consumes from BufReader's internal
+/// buffer even when it returns Pending).
 fn drain_reader<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut Option<tokio::io::BufReader<R>>,
     stream_kind: LogStreamKind,
@@ -90,24 +143,34 @@ fn drain_reader<R: tokio::io::AsyncRead + Unpin>(
 
     let mut line = String::new();
     loop {
-        let mut pinned = std::pin::pin!(reader.fill_buf());
-        match futures_lite::future::block_on(futures_lite::future::poll_once(&mut pinned)) {
-            Some(Ok(buf)) if !buf.is_empty() => {
-                line.clear();
-                let pinned_read = std::pin::pin!(reader.read_line(&mut line));
-                if let Some(Ok(n)) =
-                    futures_lite::future::block_on(futures_lite::future::poll_once(pinned_read))
-                {
-                    if n > 0 {
-                        logs.push(LogEntry {
-                            timestamp: Utc::now(),
-                            stream: stream_kind,
-                            line: line.trim_end().to_string(),
-                        });
-                    }
-                }
+        // Peek at the buffer — only proceed if a complete line is available.
+        let has_newline = {
+            let pinned = std::pin::pin!(reader.fill_buf());
+            match futures_lite::future::block_on(futures_lite::future::poll_once(pinned)) {
+                Some(Ok(buf)) if !buf.is_empty() => buf.contains(&b'\n'),
+                _ => false,
             }
-            _ => break,
+        };
+
+        if !has_newline {
+            break;
+        }
+
+        line.clear();
+        let pinned_read = std::pin::pin!(reader.read_line(&mut line));
+        if let Some(Ok(n)) =
+            futures_lite::future::block_on(futures_lite::future::poll_once(pinned_read))
+        {
+            if n > 0 {
+                logs.push(LogEntry {
+                    timestamp: Utc::now(),
+                    stream: stream_kind,
+                    line: strip_ansi(line.trim_end()),
+                });
+            }
+        } else {
+            // Should not happen since we verified \n exists, but be safe
+            break;
         }
     }
 }
@@ -763,6 +826,26 @@ mod tests {
         // Initially no logs
         let logs = resource.logs();
         assert!(logs.is_some());
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(strip_ansi("hello"), "hello");
+        assert_eq!(strip_ansi("\x1b[32mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi("\x1b[1;31mERROR\x1b[0m: fail"), "ERROR: fail");
+        assert_eq!(strip_ansi("\x1b]0;title\x07rest"), "rest");
+        assert_eq!(strip_ansi("\x1b[2K\x1b[1Gprogress"), "progress");
+    }
+
+    #[test]
+    fn strip_ansi_handles_carriage_return() {
+        // \r overwrites from start of line — keep content after last \r
+        assert_eq!(strip_ansi("progress 50%\rprogress 100%"), "progress 100%");
+        assert_eq!(strip_ansi("old text\rnew"), "new");
+        // No \r: pass through normally
+        assert_eq!(strip_ansi("no cr here"), "no cr here");
+        // Tab preserved, other controls stripped
+        assert_eq!(strip_ansi("a\tb"), "a\tb");
     }
 
     #[test]
