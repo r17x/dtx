@@ -18,10 +18,14 @@
 //! assert!("my-api".parse::<ServiceName>().is_ok());
 //! assert!("web-server-01".parse::<ServiceName>().is_ok());
 //!
-//! // Invalid names
+//! // Normalization: uppercase, underscores, invalid chars are handled
+//! assert_eq!("My_Api".parse::<ServiceName>().unwrap().as_str(), "my-api");
+//!
+//! // Normalization handles consecutive hyphens too
+//! assert_eq!("my--api".parse::<ServiceName>().unwrap().as_str(), "my-api");
+//!
+//! // Invalid names (cannot be fixed by normalization)
 //! assert!("a".parse::<ServiceName>().is_err());           // Too short
-//! assert!("My-Api".parse::<ServiceName>().is_err());      // Uppercase
-//! assert!("my--api".parse::<ServiceName>().is_err());     // Consecutive hyphens
 //! assert!("version".parse::<ServiceName>().is_err());     // Reserved
 //! ```
 
@@ -92,6 +96,36 @@ impl ServiceName {
         self.0
     }
 
+    /// Normalize a string into a valid service name form.
+    ///
+    /// - Lowercases ASCII letters
+    /// - Converts underscores to hyphens
+    /// - Collapses consecutive separators
+    /// - Strips leading/trailing hyphens
+    /// - Drops non-alphanumeric, non-separator characters
+    pub fn normalize(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut prev_hyphen = false;
+        for c in s.chars() {
+            match c {
+                '_' | '-' => {
+                    if !prev_hyphen && !result.is_empty() {
+                        result.push('-');
+                    }
+                    prev_hyphen = true;
+                }
+                c if c.is_ascii_alphanumeric() => {
+                    result.push(c.to_ascii_lowercase());
+                    prev_hyphen = false;
+                }
+                _ => {} // drop invalid chars silently
+            }
+        }
+        let trimmed_len = result.trim_end_matches('-').len();
+        result.truncate(trimmed_len);
+        result
+    }
+
     /// Check if a string would be a valid service name (without allocating).
     pub fn is_valid(s: &str) -> bool {
         Self::validate(s).is_ok()
@@ -144,8 +178,9 @@ impl FromStr for ServiceName {
     type Err = ParseServiceNameError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::validate(s)?;
-        Ok(ServiceName(s.to_string()))
+        let normalized = Self::normalize(s);
+        Self::validate(&normalized)?;
+        Ok(ServiceName(normalized))
     }
 }
 
@@ -153,8 +188,9 @@ impl TryFrom<String> for ServiceName {
     type Error = ParseServiceNameError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::validate(&s)?;
-        Ok(ServiceName(s))
+        let normalized = Self::normalize(&s);
+        Self::validate(&normalized)?;
+        Ok(ServiceName(normalized))
     }
 }
 
@@ -209,25 +245,20 @@ mod tests {
     }
 
     #[test]
-    fn invalid_uppercase() {
-        // Uppercase first letter returns InvalidStart, not InvalidChar
-        assert!(matches!(
-            "MyApi".parse::<ServiceName>(),
-            Err(ParseServiceNameError::InvalidStart(_))
-        ));
-        // Uppercase in the middle returns InvalidChar
-        assert!(matches!(
-            "myApi".parse::<ServiceName>(),
-            Err(ParseServiceNameError::InvalidChar(_, 'A', 2))
-        ));
+    fn uppercase_normalizes_to_lowercase() {
+        // Uppercase is normalized, not rejected
+        let name: ServiceName = "MyApi".parse().unwrap();
+        assert_eq!(name.as_str(), "myapi");
+
+        let name: ServiceName = "myApi".parse().unwrap();
+        assert_eq!(name.as_str(), "myapi");
     }
 
     #[test]
-    fn invalid_consecutive_hyphens() {
-        assert!(matches!(
-            "my--api".parse::<ServiceName>(),
-            Err(ParseServiceNameError::ConsecutiveHyphens(_))
-        ));
+    fn consecutive_hyphens_collapsed_during_normalization() {
+        // Consecutive hyphens are collapsed to a single hyphen
+        let name: ServiceName = "my--api".parse().unwrap();
+        assert_eq!(name.as_str(), "my-api");
     }
 
     #[test]
@@ -247,19 +278,17 @@ mod tests {
     }
 
     #[test]
-    fn invalid_ends_with_hyphen() {
-        assert!(matches!(
-            "api-".parse::<ServiceName>(),
-            Err(ParseServiceNameError::InvalidEnd(_))
-        ));
+    fn trailing_hyphen_stripped_during_normalization() {
+        // Trailing hyphens are stripped during normalization
+        let name: ServiceName = "api-".parse().unwrap();
+        assert_eq!(name.as_str(), "api");
     }
 
     #[test]
-    fn invalid_space() {
-        assert!(matches!(
-            "my api".parse::<ServiceName>(),
-            Err(ParseServiceNameError::InvalidChar(_, ' ', 2))
-        ));
+    fn space_dropped_during_normalization() {
+        // Spaces are dropped silently during normalization
+        let name: ServiceName = "my api".parse().unwrap();
+        assert_eq!(name.as_str(), "myapi");
     }
 
     #[test]
@@ -274,7 +303,50 @@ mod tests {
 
     #[test]
     fn serde_rejects_invalid() {
-        let result: Result<ServiceName, _> = serde_json::from_str("\"my api\"");
+        // "a" normalizes to "a" which is too short
+        let result: Result<ServiceName, _> = serde_json::from_str("\"a\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn serde_normalizes() {
+        let parsed: ServiceName = serde_json::from_str("\"My_Api\"").unwrap();
+        assert_eq!(parsed.as_str(), "my-api");
+    }
+
+    #[test]
+    fn normalize_underscores_to_hyphens() {
+        let name: ServiceName = "node_modules".parse().unwrap();
+        assert_eq!(name.as_str(), "node-modules");
+    }
+
+    #[test]
+    fn normalize_uppercase_to_lowercase() {
+        let name: ServiceName = "MyApi".parse().unwrap();
+        assert_eq!(name.as_str(), "myapi");
+    }
+
+    #[test]
+    fn normalize_mixed() {
+        let name: ServiceName = "My_Service_01".parse().unwrap();
+        assert_eq!(name.as_str(), "my-service-01");
+    }
+
+    #[test]
+    fn normalize_consecutive_separators() {
+        let name: ServiceName = "a__b".parse().unwrap();
+        assert_eq!(name.as_str(), "a-b");
+    }
+
+    #[test]
+    fn normalize_leading_trailing() {
+        let name: ServiceName = "_leading_".parse().unwrap();
+        assert_eq!(name.as_str(), "leading");
+    }
+
+    #[test]
+    fn normalize_identity() {
+        let name: ServiceName = "already-valid".parse().unwrap();
+        assert_eq!(name.as_str(), "already-valid");
     }
 }

@@ -116,7 +116,7 @@ impl Environment {
                         serde_yaml::Value::Bool(b) => b.to_string(),
                         serde_yaml::Value::Null => "".to_string(),
                         other => {
-                            tracing::warn!(
+                            tracing::debug!(
                                 key = %k,
                                 "Environment variable has complex type; converting with to_string"
                             );
