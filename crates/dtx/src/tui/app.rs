@@ -87,6 +87,13 @@ impl DisplayState {
     }
 }
 
+/// TUI interaction mode.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UiMode {
+    #[default]
+    Normal,
+}
+
 /// TUI application state.
 pub struct App {
     /// Service names (ordered).
@@ -107,6 +114,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// Config changed flag (set by ConfigChanged event).
     pub config_changed: bool,
+    /// Current UI mode.
+    pub mode: UiMode,
 }
 
 impl App {
@@ -128,6 +137,7 @@ impl App {
             should_quit: false,
             status_message: None,
             config_changed: false,
+            mode: UiMode::Normal,
         }
     }
 
@@ -234,6 +244,12 @@ impl App {
 
     /// Handle keyboard input (returns action to take).
     pub fn handle_key(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match &self.mode {
+            UiMode::Normal => self.handle_key_normal(key),
+        }
+    }
+
+    fn handle_key_normal(&mut self, key: KeyCode) -> Option<TuiAction> {
         match key {
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.should_quit = true;
