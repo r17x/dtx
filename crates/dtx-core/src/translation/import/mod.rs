@@ -51,3 +51,90 @@ pub fn sanitize_nix_commands(config: &mut ImportedConfig, path_env: &str) -> usi
     config.warnings.extend(warnings);
     count
 }
+
+/// Detects inline writeShellApplication definitions in nix files, exports them
+/// as packages, and rewrites commands to use the package basenames.
+///
+/// Returns the number of scripts exported, and the names of exported packages.
+pub fn export_custom_scripts(
+    config: &mut ImportedConfig,
+    flake_dir: &std::path::Path,
+) -> (usize, Vec<String>) {
+    use crate::nix::{
+        detect_scripts, export_scripts_as_packages, extract_executable, resolve_flake_imports,
+    };
+
+    // 1. Collect unresolved basenames — commands still containing /nix/store/
+    let unresolved: Vec<String> = config
+        .resources
+        .iter()
+        .filter_map(|r| r.command.as_ref())
+        .filter(|cmd| cmd.contains("/nix/store/"))
+        .filter_map(|cmd| extract_executable(cmd))
+        .collect();
+
+    if unresolved.is_empty() {
+        return (0, vec![]);
+    }
+
+    // 2. Resolve flake imports to find all nix files
+    let nix_files = match resolve_flake_imports(flake_dir) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::warn!("failed to resolve flake imports: {}", e);
+            return (0, vec![]);
+        }
+    };
+
+    // 3. Detect inline scripts matching our unresolved basenames
+    let scripts = detect_scripts(&unresolved, &nix_files);
+    if scripts.is_empty() {
+        return (0, vec![]);
+    }
+
+    // 4. Export scripts as packages (modifies nix files)
+    let result = match export_scripts_as_packages(flake_dir, &scripts) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("failed to export scripts as packages: {}", e);
+            return (0, vec![]);
+        }
+    };
+
+    // 5. Add warnings from export
+    config.warnings.extend(result.warnings);
+
+    // 6. Rewrite commands: replace /nix/store/.../bin/<name> with just <name>
+    //    for each exported package
+    for resource in &mut config.resources {
+        if let Some(ref mut cmd) = resource.command {
+            for pkg_name in &result.exported_packages {
+                let new_cmd = rewrite_store_path_for_package(cmd, pkg_name);
+                if new_cmd != *cmd {
+                    *cmd = new_cmd;
+                }
+            }
+        }
+    }
+
+    (result.exported_packages.len(), result.exported_packages)
+}
+
+/// Rewrite a nix store path in a command to just the basename,
+/// if the basename matches the given package name.
+fn rewrite_store_path_for_package(command: &str, package_name: &str) -> String {
+    command
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with("/nix/store/") {
+                if let Some(basename) = token.rsplit('/').next() {
+                    if basename == package_name {
+                        return basename;
+                    }
+                }
+            }
+            token
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}

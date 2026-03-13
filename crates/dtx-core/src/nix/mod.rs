@@ -28,7 +28,10 @@ pub mod native;
 pub mod shell;
 pub mod sync;
 
-pub use ast::FlakeAst;
+pub use ast::{
+    detect_scripts, export_scripts_as_packages, resolve_flake_imports, DetectedScript,
+    ExportResult, FlakeAst, ResolvedNixFile, ScriptContext,
+};
 pub use backend::{CliBackend, NixBackend};
 pub use client::NixClient;
 pub use command::{

@@ -340,6 +340,22 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         }
     }
 
+    // Export custom nix scripts as packages
+    if !no_nix {
+        let project_root = ctx.store.project_root();
+        if project_root.join("flake.nix").exists() {
+            let (count, names) =
+                dtx_core::translation::import::export_custom_scripts(&mut config, project_root);
+            if count > 0 {
+                out.step("nix").done_untimed(&format!(
+                    "exported {} custom script(s) as packages: {}",
+                    count,
+                    names.join(", ")
+                ));
+            }
+        }
+    }
+
     if dry_run {
         display_import_summary(out, &config);
         out.step("import").done_untimed("dry run, no changes");
