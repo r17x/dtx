@@ -5,7 +5,6 @@
 
 use crate::error::NixError;
 use crate::model::Service;
-use rnix::Root;
 use std::collections::HashSet;
 
 /// AST-based flake.nix manipulation.
@@ -18,14 +17,7 @@ pub struct FlakeAst {
 impl FlakeAst {
     /// Parse existing flake.nix content.
     pub fn parse(content: &str) -> Result<Self, NixError> {
-        let parsed = Root::parse(content);
-
-        if !parsed.errors().is_empty() {
-            let error_msgs: Vec<String> =
-                parsed.errors().iter().map(|e| format!("{:?}", e)).collect();
-            return Err(NixError::ParseError(error_msgs.join(", ")));
-        }
-
+        super::parser::parse_nix(content)?;
         Ok(Self {
             content: content.to_string(),
         })
@@ -102,8 +94,7 @@ impl FlakeAst {
             new_content.insert_str(line_start, &format!("{}{}\n", indent, package));
 
             // Re-parse to validate
-            let new_parsed = Root::parse(&new_content);
-            if !new_parsed.errors().is_empty() {
+            if !super::parser::validate_nix(&new_content) {
                 return Err(NixError::ParseError("Failed to add package".to_string()));
             }
 
@@ -130,8 +121,7 @@ impl FlakeAst {
                 new_content.replace_range(pos..pos + pattern.len(), "\n");
 
                 // Re-parse to validate
-                let new_parsed = Root::parse(&new_content);
-                if !new_parsed.errors().is_empty() {
+                if !super::parser::validate_nix(&new_content) {
                     return Err(NixError::ParseError("Failed to remove package".to_string()));
                 }
 
@@ -190,7 +180,7 @@ impl FlakeAst {
 
     /// Check if the AST is valid.
     pub fn is_valid(&self) -> bool {
-        Root::parse(&self.content).errors().is_empty()
+        super::parser::validate_nix(&self.content)
     }
 
     /// Collect unique packages from services.
