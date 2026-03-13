@@ -36,6 +36,7 @@ mod container;
 mod orchestrator;
 mod probe;
 mod process;
+mod process_tree;
 mod translator;
 mod vm;
 
@@ -49,6 +50,7 @@ pub use container::ContainerResource;
 pub use orchestrator::{Dependency, ResourceOrchestrator, StartAllResult};
 pub use probe::ProbeRunner;
 pub use process::ProcessResource;
+pub use process_tree::get_descendant_pids;
 pub use translator::ProcessToContainerTranslator;
 pub use vm::{VMResource, VMResourceConfig};
 
