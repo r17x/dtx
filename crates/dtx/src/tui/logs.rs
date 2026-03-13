@@ -148,11 +148,7 @@ impl LogStore {
 
     /// Read the last `count` lines from a log file by seeking from the end.
     #[allow(dead_code)]
-    pub fn load_tail(
-        &mut self,
-        service: &str,
-        count: usize,
-    ) -> io::Result<Vec<DisplayLog>> {
+    pub fn load_tail(&mut self, service: &str, count: usize) -> io::Result<Vec<DisplayLog>> {
         use std::io::{Read, Seek, SeekFrom};
 
         self.flush_service(service);
@@ -208,7 +204,7 @@ impl LogStore {
         // BufRead::lines handles UTF-8 per-line, avoiding mid-character splits
         let cursor = io::Cursor::new(buf);
         let all_lines: Vec<String> = BufRead::lines(BufReader::new(cursor))
-            .filter_map(|l| l.ok())
+            .map_while(Result::ok)
             .collect();
         let start = all_lines.len().saturating_sub(count);
         let logs = all_lines[start..]

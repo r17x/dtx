@@ -398,6 +398,18 @@ impl App {
             .unwrap_or(DisplayState::Pending);
         let uptime = self.started_at.get(&name).map(|t| t.elapsed());
 
+        let (command, dependencies) = ConfigStore::discover_and_load()
+            .ok()
+            .and_then(|store| {
+                store.get_resource(&name).map(|rc| {
+                    let cmd = rc.command.clone();
+                    let deps: Vec<String> =
+                        rc.depends_on.iter().map(|d| d.name().to_string()).collect();
+                    (cmd, deps)
+                })
+            })
+            .unwrap_or_default();
+
         self.detail = Some(ServiceDetail {
             name: name.clone(),
             state,
@@ -405,8 +417,8 @@ impl App {
             port: self.service_ports.get(&name).copied(),
             uptime,
             restart_count: *self.restart_counts.get(&name).unwrap_or(&0),
-            command: None,
-            dependencies: Vec::new(),
+            command,
+            dependencies,
         });
     }
 
@@ -441,7 +453,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Char('r') | KeyCode::Char('s') => return self.handle_service_action(key),
+            KeyCode::Char('r') | KeyCode::Char('s') => self.handle_service_action(key),
             KeyCode::Char('a') if self.config_changed => {
                 self.config_changed = false;
                 self.status_message = Some("Reloading config...".to_string());
@@ -465,12 +477,14 @@ impl App {
                     let fallback_port = self.service_ports.get(&name).copied();
                     let (command, port, deps) = ConfigStore::discover_and_load()
                         .ok()
-                        .and_then(|store| store.get_resource(&name).map(|rc| {
-                            let cmd = rc.command.clone().unwrap_or_default();
-                            let d: Vec<String> =
-                                rc.depends_on.iter().map(|d| d.name().to_string()).collect();
-                            (cmd, rc.port, d)
-                        }))
+                        .and_then(|store| {
+                            store.get_resource(&name).map(|rc| {
+                                let cmd = rc.command.clone().unwrap_or_default();
+                                let d: Vec<String> =
+                                    rc.depends_on.iter().map(|d| d.name().to_string()).collect();
+                                (cmd, rc.port, d)
+                            })
+                        })
                         .unwrap_or_else(|| (String::new(), fallback_port, Vec::new()));
                     self.mode = UiMode::Wizard(Box::new(super::wizard::WizardState::new_edit(
                         &name, &command, port, deps, available,
@@ -478,47 +492,14 @@ impl App {
                 }
                 None
             }
-            KeyCode::PageUp => {
-                let height = 20;
-                let total = self.filtered_log_count();
-                self.log_scroll.scroll_up(height, total);
-                None
-            }
-            KeyCode::PageDown => {
-                self.log_scroll.scroll_down(20);
-                None
-            }
-            KeyCode::Char('c') => {
-                self.log_store.clear(None);
-                self.log_scroll.jump_to_bottom();
-                self.status_message = Some("Logs cleared".to_string());
-                None
-            }
-            KeyCode::Char('/') => {
-                self.mode = UiMode::Search {
-                    query: String::new(),
-                    cursor: 0,
-                };
-                None
-            }
-            KeyCode::Char('n') => {
-                self.next_match();
-                None
-            }
-            KeyCode::Char('N') => {
-                self.prev_match();
-                None
-            }
-            KeyCode::Char('F') => {
-                let initial = self.active_filter.clone().unwrap_or_default();
-                let cursor = initial.len();
-                self.mode = UiMode::Filter {
-                    query: initial,
-                    cursor,
-                };
-                None
-            }
-            KeyCode::Char('S') => return self.handle_service_action(key),
+            KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Char('c')
+            | KeyCode::Char('/')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N')
+            | KeyCode::Char('F') => self.handle_log_action(key),
+            KeyCode::Char('S') => self.handle_service_action(key),
             KeyCode::Char('g') => {
                 self.selected = 0;
                 None
@@ -661,7 +642,7 @@ impl App {
                 None
             }
             KeyCode::Esc => {
-                self.mode = UiMode::Normal;
+                self.mode = self.return_mode();
                 None
             }
             _ => {
@@ -684,14 +665,14 @@ impl App {
                     }
                 }
                 self.log_scroll.jump_to_bottom();
-                self.mode = UiMode::Normal;
+                self.mode = self.return_mode();
                 None
             }
             KeyCode::Esc => {
                 self.active_filter = None;
                 self.status_message = Some("Filter cleared".to_string());
                 self.log_scroll.jump_to_bottom();
-                self.mode = UiMode::Normal;
+                self.mode = self.return_mode();
                 None
             }
             _ => {
@@ -699,6 +680,64 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Determine which mode to return to after closing search/filter.
+    /// Returns Detail (with refreshed data) if active, Normal otherwise.
+    fn return_mode(&mut self) -> UiMode {
+        if self.detail.is_some() {
+            self.gather_detail();
+            UiMode::Detail
+        } else {
+            UiMode::Normal
+        }
+    }
+
+    /// Handle log action keys — shared by Normal and Detail modes.
+    /// In Detail mode, 'c' clears only the selected service's logs.
+    fn handle_log_action(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::PageUp => {
+                let height = 20;
+                let total = self.filtered_log_count();
+                self.log_scroll.scroll_up(height, total);
+            }
+            KeyCode::PageDown => {
+                self.log_scroll.scroll_down(20);
+            }
+            KeyCode::Char('c') => {
+                let scope = if self.detail.is_some() {
+                    self.selected_service().map(|s| s.to_string())
+                } else {
+                    None
+                };
+                self.log_store.clear(scope.as_deref());
+                self.log_scroll.jump_to_bottom();
+                self.status_message = Some("Logs cleared".to_string());
+            }
+            KeyCode::Char('/') => {
+                self.mode = UiMode::Search {
+                    query: String::new(),
+                    cursor: 0,
+                };
+            }
+            KeyCode::Char('n') => {
+                self.next_match();
+            }
+            KeyCode::Char('N') => {
+                self.prev_match();
+            }
+            KeyCode::Char('F') => {
+                let initial = self.active_filter.clone().unwrap_or_default();
+                let cursor = initial.len();
+                self.mode = UiMode::Filter {
+                    query: initial,
+                    cursor,
+                };
+            }
+            _ => {}
+        }
+        None
     }
 
     /// Handle service control keys (r/s/S) — shared by Normal and Detail modes.
@@ -766,6 +805,14 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('s') | KeyCode::Char('S') => {
                 self.handle_service_action(key)
             }
+            // Log actions — shared with Normal mode
+            KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Char('c')
+            | KeyCode::Char('/')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N')
+            | KeyCode::Char('F') => self.handle_log_action(key),
             _ => None,
         }
     }
@@ -777,7 +824,7 @@ impl App {
         };
         if query.is_empty() {
             self.search_state = None;
-            self.mode = UiMode::Normal;
+            self.mode = self.return_mode();
             return;
         }
         let query_lower = query.to_lowercase();
@@ -804,7 +851,7 @@ impl App {
             self.status_message = Some(format!("{} match(es) found", count));
             self.jump_to_current_match();
         }
-        self.mode = UiMode::Normal;
+        self.mode = self.return_mode();
     }
 
     fn jump_to_current_match(&mut self) {
@@ -1150,35 +1197,30 @@ pub async fn run_tui(
                                     app.set_status(format!("Deleted {}", name));
                                 }
                             }
-                            Err(e) => {
-                                app.set_status(format!("Failed to delete: {}", e))
-                            }
+                            Err(e) => app.set_status(format!("Failed to delete: {}", e)),
                         },
-                        Err(e) => {
-                            app.set_status(format!("Failed to load config: {}", e))
-                        }
+                        Err(e) => app.set_status(format!("Failed to load config: {}", e)),
                     }
                 }
-                TuiAction::AddService(result) => {
-                    match ConfigStore::discover_and_load() {
-                        Ok(mut store) => {
-                            let rc = wizard_result_to_resource_config(&result);
-                            if let Err(e) = store.add_resource(&result.name, rc) {
-                                app.set_status(format!("Failed to add: {}", e));
-                            } else if let Err(e) = store.save() {
-                                app.set_status(format!("Failed to save: {}", e));
-                            } else {
-                                let svc = dtx_core::model::Service {
-                                    name: result.name.clone(),
-                                    command: result.command.clone(),
-                                    package: None,
-                                    port: result.port,
-                                    working_dir: None,
-                                    environment: None,
-                                    depends_on: if result.deps.is_empty() {
-                                        None
-                                    } else {
-                                        Some(
+                TuiAction::AddService(result) => match ConfigStore::discover_and_load() {
+                    Ok(mut store) => {
+                        let rc = wizard_result_to_resource_config(&result);
+                        if let Err(e) = store.add_resource(&result.name, rc) {
+                            app.set_status(format!("Failed to add: {}", e));
+                        } else if let Err(e) = store.save() {
+                            app.set_status(format!("Failed to save: {}", e));
+                        } else {
+                            let svc = dtx_core::model::Service {
+                                name: result.name.clone(),
+                                command: result.command.clone(),
+                                package: None,
+                                port: result.port,
+                                working_dir: None,
+                                environment: None,
+                                depends_on: if result.deps.is_empty() {
+                                    None
+                                } else {
+                                    Some(
                                             result
                                                 .deps
                                                 .iter()
@@ -1189,44 +1231,38 @@ pub async fn run_tui(
                                                 })
                                                 .collect(),
                                         )
-                                    },
-                                    health_check: None,
-                                    shutdown_command: None,
-                                    enabled: true,
-                                };
-                                let mut config = service_to_config(&svc, &project_dir);
-                                if let Some(ref env) = nix_env {
-                                    apply_nix_env(&mut config, env);
-                                }
-                                orchestrator.add_resource(config);
-                                app.add_service(result.name.clone());
-                                if let Some(port) = result.port {
-                                    app.set_port(&result.name, port);
-                                }
+                                },
+                                health_check: None,
+                                shutdown_command: None,
+                                enabled: true,
+                            };
+                            let mut config = service_to_config(&svc, &project_dir);
+                            if let Some(ref env) = nix_env {
+                                apply_nix_env(&mut config, env);
+                            }
+                            orchestrator.add_resource(config);
+                            app.add_service(result.name.clone());
+                            if let Some(port) = result.port {
+                                app.set_port(&result.name, port);
+                            }
 
-                                let rid = ResourceId::new(&result.name);
-                                if let Some(resource) = orchestrator.get_resource(&rid) {
-                                    let mut resource = resource.write().await;
-                                    let ctx = Context::new();
-                                    if let Err(e) = resource.start(&ctx).await {
-                                        app.set_status(format!(
-                                            "Added {} but failed to start: {}",
-                                            result.name, e
-                                        ));
-                                    } else {
-                                        app.set_status(format!(
-                                            "Added and started {}",
-                                            result.name
-                                        ));
-                                    }
+                            let rid = ResourceId::new(&result.name);
+                            if let Some(resource) = orchestrator.get_resource(&rid) {
+                                let mut resource = resource.write().await;
+                                let ctx = Context::new();
+                                if let Err(e) = resource.start(&ctx).await {
+                                    app.set_status(format!(
+                                        "Added {} but failed to start: {}",
+                                        result.name, e
+                                    ));
+                                } else {
+                                    app.set_status(format!("Added and started {}", result.name));
                                 }
                             }
                         }
-                        Err(e) => {
-                            app.set_status(format!("Failed to load config: {}", e))
-                        }
                     }
-                }
+                    Err(e) => app.set_status(format!("Failed to load config: {}", e)),
+                },
                 TuiAction::EditService(original_name, result) => {
                     match ConfigStore::discover_and_load() {
                         Ok(mut store) => {
@@ -1243,9 +1279,7 @@ pub async fn run_tui(
                                 ));
                             }
                         }
-                        Err(e) => {
-                            app.set_status(format!("Failed to load config: {}", e))
-                        }
+                        Err(e) => app.set_status(format!("Failed to load config: {}", e)),
                     }
                 }
                 TuiAction::Reload => match ConfigStore::discover_and_load() {

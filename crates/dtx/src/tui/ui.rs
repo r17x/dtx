@@ -73,23 +73,22 @@ fn draw_header(f: &mut Frame, area: Rect) {
 
 /// Draw the main content area (services + logs).
 fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(area);
-
     let selected_service = service_infos.get(app.selected).map(|s| s.name.as_str());
 
-    draw_services(f, app, service_infos, chunks[0]);
-
+    // In Detail mode, hide the sidebar — full width for detail + logs
     if let (UiMode::Detail, Some(ref detail)) = (&app.mode, &app.detail) {
-        let right_chunks = Layout::default()
+        let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(10), Constraint::Min(5)])
-            .split(chunks[1]);
-        draw_detail(f, detail, right_chunks[0]);
-        draw_logs(f, app, selected_service, right_chunks[1]);
+            .split(area);
+        draw_detail(f, detail, chunks[0]);
+        draw_logs(f, app, selected_service, chunks[1]);
     } else {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(area);
+        draw_services(f, app, service_infos, chunks[0]);
         draw_logs(f, app, selected_service, chunks[1]);
     }
 }
@@ -435,6 +434,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         UiMode::Detail => vec![
             ("Esc", "Back"),
             ("j/k", "Navigate"),
+            ("/", "Search"),
+            ("F", "Filter"),
+            ("PgUp/Dn", "Scroll"),
             ("s", "Stop"),
             ("S", "Start"),
             ("r", "Restart"),
