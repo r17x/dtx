@@ -8,7 +8,10 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, DisplayHealth, DisplayState, ServiceDetail, ServiceDisplayInfo, UiMode};
+use super::app::{
+    App, DisplayHealth, DisplayState, DisplayStateFilter, ServiceDetail, ServiceDisplayInfo,
+    UiMode,
+};
 
 /// Create a centered overlay rectangle within the given area.
 fn centered_overlay(area: Rect, width: u16, height: u16) -> Rect {
@@ -99,10 +102,22 @@ fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], are
 
 /// Draw the service list.
 fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
-    let items: Vec<ListItem> = service_infos
+    let filtered_infos: Vec<(usize, &ServiceDisplayInfo)> = service_infos
         .iter()
         .enumerate()
-        .map(|(i, svc)| {
+        .filter(|(_, svc)| match app.filter_state {
+            DisplayStateFilter::All => true,
+            DisplayStateFilter::Running => {
+                matches!(svc.state, DisplayState::Running { .. } | DisplayState::Starting)
+            }
+            DisplayStateFilter::Failed => matches!(svc.state, DisplayState::Failed { .. }),
+            DisplayStateFilter::Completed => matches!(svc.state, DisplayState::Completed { .. }),
+        })
+        .collect();
+
+    let items: Vec<ListItem> = filtered_infos
+        .iter()
+        .map(|&(i, svc)| {
             let (indicator, color) = match &svc.state {
                 DisplayState::Running { .. } => ("●", Color::Green),
                 DisplayState::Starting => ("◐", Color::Yellow),
@@ -444,6 +459,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         UiMode::Normal => vec![
             ("j/k", "Navigate"),
             ("Enter", "Detail"),
+            ("f", "State"),
             ("/", "Search"),
             ("F", "Filter"),
             ("s", "Stop"),
@@ -490,6 +506,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             "[a] Reload",
             Style::default()
                 .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Add state filter indicator when active
+    if app.filter_state != DisplayStateFilter::All {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("[Filter: {}]", app.filter_state.label()),
+            Style::default()
+                .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ));
     }

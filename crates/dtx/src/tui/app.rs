@@ -286,6 +286,7 @@ impl App {
             started_at: HashMap::new(),
             startup_settled: false,
             recent_failures: HashMap::new(),
+            filter_state: DisplayStateFilter::All,
         }
     }
 
@@ -556,6 +557,10 @@ impl App {
                         &name, &command, port, deps, available,
                     )));
                 }
+                None
+            }
+            KeyCode::Char('f') => {
+                self.filter_state = self.filter_state.next();
                 None
             }
             KeyCode::PageUp
@@ -1163,18 +1168,12 @@ pub async fn run_tui(
         }
     }
 
-    if !start_result.failed.is_empty() {
-        let failed_names: Vec<_> = start_result
-            .failed
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect();
-        app.status_message = Some(format!(
-            "Started {}, failed: {}",
-            start_result.started.len(),
-            failed_names.join(", ")
-        ));
-    }
+    app.status_message = Some(format!(
+        "Started: {} ok, {} failed, {} skipped",
+        start_result.started.len(),
+        start_result.failed.len(),
+        start_result.skipped.len()
+    ));
 
     // Main loop
     let tick_rate = Duration::from_millis(100);
