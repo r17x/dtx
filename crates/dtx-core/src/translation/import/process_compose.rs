@@ -24,7 +24,11 @@ impl Importer for ProcessComposeImporter {
     }
 
     fn import(&self, content: &str) -> ImportResult<ImportedConfig> {
-        let pc: ProcessComposeFile = serde_yaml::from_str(content).map_err(ImportError::from)?;
+        let pc: ProcessComposeFile = if content.trim_start().starts_with('{') {
+            serde_json::from_str(content).map_err(ImportError::from)?
+        } else {
+            serde_yaml::from_str(content).map_err(ImportError::from)?
+        };
 
         let mut config = ImportedConfig::new();
 
@@ -243,5 +247,67 @@ processes:
             Some(&"production".to_string())
         );
         assert_eq!(api.environment.get("PORT"), Some(&"3000".to_string()));
+    }
+
+    #[test]
+    fn import_json_basic() {
+        let json = r#"{
+  "processes": {
+    "api": {
+      "command": "npm start"
+    },
+    "db": {
+      "command": "postgres"
+    }
+  }
+}"#;
+        let importer = ProcessComposeImporter::new();
+        let result = importer.import(json).unwrap();
+
+        assert_eq!(result.resources.len(), 2);
+        let api = result.resources.iter().find(|r| r.name == "api").unwrap();
+        assert_eq!(api.command.as_deref(), Some("npm start"));
+    }
+
+    #[test]
+    fn import_json_with_depends_on() {
+        let json = r#"{
+  "processes": {
+    "api": {
+      "command": "npm start",
+      "depends_on": {
+        "db": { "condition": "process_healthy" }
+      }
+    },
+    "db": {
+      "command": "postgres"
+    }
+  }
+}"#;
+        let importer = ProcessComposeImporter::new();
+        let result = importer.import(json).unwrap();
+
+        let api = result.resources.iter().find(|r| r.name == "api").unwrap();
+        assert!(api.depends_on.contains(&"db".to_string()));
+    }
+
+    #[test]
+    fn import_json_with_environment() {
+        let json = r#"{
+  "processes": {
+    "api": {
+      "command": "npm start",
+      "environment": ["NODE_ENV=production", "PORT=3000"]
+    }
+  }
+}"#;
+        let importer = ProcessComposeImporter::new();
+        let result = importer.import(json).unwrap();
+
+        let api = result.resources.iter().find(|r| r.name == "api").unwrap();
+        assert_eq!(
+            api.environment.get("NODE_ENV"),
+            Some(&"production".to_string())
+        );
     }
 }

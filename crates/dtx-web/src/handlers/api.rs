@@ -441,7 +441,8 @@ fn spawn_console_logger(
                             LifecycleEvent::Stopping { .. }
                             | LifecycleEvent::DependencyWaiting { .. }
                             | LifecycleEvent::DependencyResolved { .. }
-                            | LifecycleEvent::ConfigChanged { .. } => {}
+                            | LifecycleEvent::ConfigChanged { .. }
+                            | LifecycleEvent::MemoryChanged { .. } => {}
                         },
                         None => break,
                     }

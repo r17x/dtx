@@ -358,6 +358,18 @@ pub enum Commands {
         #[command(subcommand)]
         command: NixCommands,
     },
+
+    /// Code intelligence (AST-based symbol analysis)
+    Code {
+        #[command(subcommand)]
+        command: CodeCommands,
+    },
+
+    /// Memory store management
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,6 +388,71 @@ pub enum NixCommands {
 
     /// List Nix packages from services
     Packages,
+}
+
+#[derive(Subcommand)]
+pub enum CodeCommands {
+    /// Show symbol overview for a file
+    Symbols {
+        /// File path
+        file: std::path::PathBuf,
+    },
+
+    /// Find symbols by name pattern
+    Find {
+        /// Symbol name pattern (substring match)
+        pattern: String,
+
+        /// Restrict search to file or directory
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+    },
+
+    /// Search for a regex pattern across files
+    Search {
+        /// Regex pattern
+        pattern: String,
+
+        /// File glob filter (e.g. "*.rs")
+        #[arg(short, long)]
+        glob: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MemoryCommands {
+    /// List all memories
+    List,
+
+    /// Read a memory
+    Read {
+        /// Memory name
+        name: String,
+    },
+
+    /// Create or update a memory
+    Write {
+        /// Memory name (kebab-case)
+        name: String,
+
+        /// Memory content
+        #[arg(short, long)]
+        content: String,
+
+        /// Memory kind: user, project, feedback, reference
+        #[arg(short, long)]
+        kind: Option<String>,
+
+        /// One-line description
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+
+    /// Delete a memory
+    Delete {
+        /// Memory name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -458,6 +535,30 @@ async fn run(out: &output::Output) -> Result<()> {
             return cmd::mcp::run(cmd::mcp::McpArgs { project }).await;
         }
 
+        Commands::Code { command } => {
+            return match command {
+                CodeCommands::Symbols { file } => cmd::code::symbols(out, file).await,
+                CodeCommands::Find { pattern, path } => cmd::code::find(out, pattern, path).await,
+                CodeCommands::Search { pattern, glob } => {
+                    cmd::code::search(out, pattern, glob).await
+                }
+            };
+        }
+
+        Commands::Memory { command } => {
+            return match command {
+                MemoryCommands::List => cmd::memory::list(out).await,
+                MemoryCommands::Read { name } => cmd::memory::read(out, name).await,
+                MemoryCommands::Write {
+                    name,
+                    content,
+                    kind,
+                    description,
+                } => cmd::memory::write(out, name, content, kind, description).await,
+                MemoryCommands::Delete { name } => cmd::memory::delete(out, name).await,
+            };
+        }
+
         _ => {}
     }
 
@@ -471,23 +572,28 @@ async fn run(out: &output::Output) -> Result<()> {
         | Commands::Search { .. }
         | Commands::Web { .. }
         | Commands::Mcp { .. }
-        | Commands::Config { .. } => unreachable!(),
+        | Commands::Config { .. }
+        | Commands::Code { .. }
+        | Commands::Memory { .. } => unreachable!(),
 
         Commands::Import {
             file,
             format,
             no_nix,
             dry_run,
-        } => cmd::import::run(
-            &mut ctx,
-            out,
-            cmd::import::ImportArgs {
-                file,
-                format,
-                no_nix,
-                dry_run,
-            },
-        ),
+        } => {
+            cmd::import::run(
+                &mut ctx,
+                out,
+                cmd::import::ImportArgs {
+                    file,
+                    format,
+                    no_nix,
+                    dry_run,
+                },
+            )
+            .await
+        }
 
         Commands::Add(args) => cmd::add::run(
             &mut ctx,

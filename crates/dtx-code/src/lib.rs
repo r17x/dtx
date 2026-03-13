@@ -1,0 +1,20 @@
+pub mod edit;
+pub mod error;
+pub mod index;
+pub mod language;
+pub mod parser;
+pub mod patterns;
+pub mod references;
+pub mod search;
+pub mod symbol;
+pub mod workspace;
+
+pub use edit::{insert_after_symbol, insert_before_symbol, replace_symbol_body};
+pub use error::{CodeError, Result};
+pub use index::FileIndex;
+pub use language::detect;
+pub use parser::parse_source;
+pub use references::{find_references, Reference};
+pub use search::{search_pattern, SearchMatch};
+pub use symbol::{Symbol, SymbolKind, SymbolOverview};
+pub use workspace::{SymbolMatch, WorkspaceIndex};

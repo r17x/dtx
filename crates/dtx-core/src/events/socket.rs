@@ -27,11 +27,9 @@ pub fn event_socket_path() -> Option<PathBuf> {
     find_project_root_cwd().map(|root| root.join(DTX_DIR).join(SOCKET_FILENAME))
 }
 
-/// Notify the web server that configuration has changed (async version).
-///
-/// Fire-and-forget: connects to the Unix socket, sends a JSON message,
-/// and closes. Silently ignores errors (web server may not be running).
-pub async fn notify_config_changed(project_id: &str) {
+/// Send a JSON message to the event socket (async).
+/// Fire-and-forget: silently ignores errors (web server may not be running).
+async fn send_event_async(msg: serde_json::Value) {
     let Some(path) = event_socket_path() else {
         debug!("No .dtx directory found, skipping event notification");
         return;
@@ -45,14 +43,9 @@ pub async fn notify_config_changed(project_id: &str) {
         return;
     }
 
-    let msg = serde_json::json!({
-        "event": "config_changed",
-        "project_id": project_id,
-    });
-
+    let payload = format!("{}\n", msg);
     match UnixStream::connect(&path).await {
         Ok(mut stream) => {
-            let payload = format!("{}\n", msg);
             if let Err(e) = stream.write_all(payload.as_bytes()).await {
                 debug!("Failed to write to event socket: {}", e);
             }
@@ -63,11 +56,9 @@ pub async fn notify_config_changed(project_id: &str) {
     }
 }
 
-/// Notify the web/TUI that configuration has changed (sync version).
-///
+/// Send a JSON message to the event socket (sync).
 /// Uses std::os::unix::net::UnixStream — no tokio runtime needed.
-/// Safe to call from sync CLI commands.
-pub fn notify_config_changed_sync() {
+fn send_event_sync(msg: serde_json::Value) {
     let Some(path) = event_socket_path() else {
         return;
     };
@@ -76,12 +67,7 @@ pub fn notify_config_changed_sync() {
         return;
     }
 
-    let msg = serde_json::json!({
-        "event": "config_changed",
-        "project_id": "",
-    });
     let payload = format!("{}\n", msg);
-
     match std::os::unix::net::UnixStream::connect(&path) {
         Ok(mut stream) => {
             use std::io::Write;
@@ -93,6 +79,38 @@ pub fn notify_config_changed_sync() {
             debug!("Failed to connect to event socket: {}", e);
         }
     }
+}
+
+pub async fn notify_config_changed(project_id: &str) {
+    send_event_async(serde_json::json!({
+        "event": "config_changed",
+        "project_id": project_id,
+    }))
+    .await;
+}
+
+pub fn notify_config_changed_sync() {
+    send_event_sync(serde_json::json!({
+        "event": "config_changed",
+        "project_id": "",
+    }));
+}
+
+pub async fn notify_memory_changed(project_id: &str, memory_name: &str) {
+    send_event_async(serde_json::json!({
+        "event": "memory_changed",
+        "project_id": project_id,
+        "memory_name": memory_name,
+    }))
+    .await;
+}
+
+pub fn notify_memory_changed_sync(project_id: &str, memory_name: &str) {
+    send_event_sync(serde_json::json!({
+        "event": "memory_changed",
+        "project_id": project_id,
+        "memory_name": memory_name,
+    }));
 }
 
 /// Start the Unix socket event listener.
@@ -150,19 +168,34 @@ async fn handle_connection(stream: UnixStream, event_bus: Arc<ResourceEventBus>)
     while let Ok(Some(line)) = lines.next_line().await {
         match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(msg) => {
+                let event_type = msg.get("event").and_then(|v| v.as_str()).unwrap_or("");
                 let project_id = msg
                     .get("project_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
 
-                let event = LifecycleEvent::ConfigChanged {
-                    project_id,
-                    timestamp: Utc::now(),
+                let event = match event_type {
+                    "memory_changed" => {
+                        let memory_name = msg
+                            .get("memory_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        LifecycleEvent::MemoryChanged {
+                            project_id,
+                            memory_name,
+                            timestamp: Utc::now(),
+                        }
+                    }
+                    _ => LifecycleEvent::ConfigChanged {
+                        project_id,
+                        timestamp: Utc::now(),
+                    },
                 };
 
                 let count = event_bus.publish(event);
-                debug!("Published config_changed event to {} subscribers", count);
+                debug!("Published {} event to {} subscribers", event_type, count);
             }
             Err(e) => {
                 warn!("Failed to parse socket message: {}", e);

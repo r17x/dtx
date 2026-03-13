@@ -14,7 +14,7 @@ mod types;
 
 pub use handler::{DefaultMcpHandler, McpHandler};
 pub use resources::{
-    uris, DxtUri, ListResourcesResult, ReadResourceParams, ReadResourceResult, Resource,
+    uris, DtxUri, ListResourcesResult, ReadResourceParams, ReadResourceResult, Resource,
     ResourceContent, ResourceContentType,
 };
 pub use tools::{dtx_tools, CallToolParams, CallToolResult, ListToolsResult, Tool, ToolContent};
