@@ -10,6 +10,15 @@ use ratatui::{
 
 use super::app::{App, DisplayHealth, DisplayState, ServiceDetail, ServiceDisplayInfo, UiMode};
 
+/// Create a centered overlay rectangle within the given area.
+fn centered_overlay(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width.saturating_sub(4));
+    let h = height.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
 /// Main draw function with service infos.
 pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo]) {
     let chunks = Layout::default()
@@ -66,10 +75,7 @@ fn draw_header(f: &mut Frame, area: Rect) {
 fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
-        ])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
 
     let selected_service = service_infos.get(app.selected).map(|s| s.name.as_str());
@@ -79,10 +85,7 @@ fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], are
     if let (UiMode::Detail, Some(ref detail)) = (&app.mode, &app.detail) {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(10),
-                Constraint::Min(5),
-            ])
+            .constraints([Constraint::Length(10), Constraint::Min(5)])
             .split(chunks[1]);
         draw_detail(f, detail, right_chunks[0]);
         draw_logs(f, app, selected_service, right_chunks[1]);
@@ -203,7 +206,13 @@ fn draw_detail(f: &mut Frame, detail: &ServiceDetail, area: Rect) {
         DisplayState::Stopped => "Stopped".to_string(),
         DisplayState::Completed { exit_code } => format!("Completed (exit {})", exit_code),
         DisplayState::Failed { error } => {
-            format!("Failed{}", error.as_ref().map(|e| format!(": {}", e)).unwrap_or_default())
+            format!(
+                "Failed{}",
+                error
+                    .as_ref()
+                    .map(|e| format!(": {}", e))
+                    .unwrap_or_default()
+            )
         }
     };
 
@@ -219,18 +228,24 @@ fn draw_detail(f: &mut Frame, detail: &ServiceDetail, area: Rect) {
         DisplayHealth::Unknown => (Style::default().fg(Color::DarkGray), "?"),
     };
 
-    let uptime_str = detail.uptime.map(|d| {
-        let secs = d.as_secs();
-        if secs >= 3600 {
-            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-        } else if secs >= 60 {
-            format!("{}m {}s", secs / 60, secs % 60)
-        } else {
-            format!("{}s", secs)
-        }
-    }).unwrap_or_else(|| "-".to_string());
+    let uptime_str = detail
+        .uptime
+        .map(|d| {
+            let secs = d.as_secs();
+            if secs >= 3600 {
+                format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+            } else if secs >= 60 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}s", secs)
+            }
+        })
+        .unwrap_or_else(|| "-".to_string());
 
-    let port_str = detail.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+    let port_str = detail
+        .port
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".to_string());
 
     let mut lines = vec![
         Line::from(vec![
@@ -369,7 +384,12 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
             height: 1,
         };
         let search_text = Line::from(vec![
-            Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(query.as_str()),
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ]);
@@ -385,7 +405,12 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
             height: 1,
         };
         let filter_text = Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "filter: ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(query.as_str()),
             Span::styled("█", Style::default().fg(Color::Magenta)),
         ]);
@@ -414,25 +439,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("S", "Start"),
             ("r", "Restart"),
         ],
-        UiMode::Search { .. } => vec![
-            ("Enter", "Find"),
-            ("Esc", "Cancel"),
-        ],
-        UiMode::Filter { .. } => vec![
-            ("Enter", "Apply"),
-            ("Esc", "Clear"),
-        ],
-        UiMode::Confirm { .. } => vec![
-            ("y", "Yes"),
-            ("n", "No"),
-        ],
-        UiMode::Help => vec![
-            ("?/Esc", "Close"),
-        ],
-        UiMode::Wizard(_) => vec![
-            ("Enter", "Next"),
-            ("Esc", "Back"),
-        ],
+        UiMode::Search { .. } => vec![("Enter", "Find"), ("Esc", "Cancel")],
+        UiMode::Filter { .. } => vec![("Enter", "Apply"), ("Esc", "Clear")],
+        UiMode::Confirm { .. } => vec![("y", "Yes"), ("n", "No")],
+        UiMode::Help => vec![("?/Esc", "Close")],
+        UiMode::Wizard(_) => vec![("Enter", "Next"), ("Esc", "Back")],
     };
 
     let mut spans = Vec::new();
@@ -454,7 +465,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             "[a] Reload",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -474,64 +487,78 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
-    let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 20u16.min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let overlay_area = Rect::new(x, y, width, height);
+    let overlay_area = centered_overlay(area, 50, 20);
 
     f.render_widget(Clear, overlay_area);
 
-    let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let group_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let group_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
 
     let lines = vec![
         Line::from(Span::styled(" Navigation", group_style)),
         Line::from(vec![
-            Span::styled("  j/k ↑↓  ", key_style), Span::raw("Select service"),
+            Span::styled("  j/k ↑↓  ", key_style),
+            Span::raw("Select service"),
         ]),
         Line::from(vec![
-            Span::styled("  g/G     ", key_style), Span::raw("Jump to top/bottom"),
+            Span::styled("  g/G     ", key_style),
+            Span::raw("Jump to top/bottom"),
         ]),
         Line::from(vec![
-            Span::styled("  Enter   ", key_style), Span::raw("Detail view"),
+            Span::styled("  Enter   ", key_style),
+            Span::raw("Detail view"),
         ]),
         Line::from(vec![
-            Span::styled("  Esc     ", key_style), Span::raw("Back / Close"),
+            Span::styled("  Esc     ", key_style),
+            Span::raw("Back / Close"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(" Logs", group_style)),
         Line::from(vec![
-            Span::styled("  PgUp/Dn ", key_style), Span::raw("Scroll logs"),
+            Span::styled("  PgUp/Dn ", key_style),
+            Span::raw("Scroll logs"),
         ]),
         Line::from(vec![
-            Span::styled("  /       ", key_style), Span::raw("Search logs"),
+            Span::styled("  /       ", key_style),
+            Span::raw("Search logs"),
         ]),
         Line::from(vec![
-            Span::styled("  n/N     ", key_style), Span::raw("Next/prev match"),
+            Span::styled("  n/N     ", key_style),
+            Span::raw("Next/prev match"),
         ]),
         Line::from(vec![
-            Span::styled("  F       ", key_style), Span::raw("Filter logs"),
+            Span::styled("  F       ", key_style),
+            Span::raw("Filter logs"),
         ]),
         Line::from(vec![
-            Span::styled("  c       ", key_style), Span::raw("Clear logs"),
+            Span::styled("  c       ", key_style),
+            Span::raw("Clear logs"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(" Control", group_style)),
         Line::from(vec![
-            Span::styled("  s       ", key_style), Span::raw("Stop service"),
+            Span::styled("  s       ", key_style),
+            Span::raw("Stop service"),
         ]),
         Line::from(vec![
-            Span::styled("  S       ", key_style), Span::raw("Start service"),
+            Span::styled("  S       ", key_style),
+            Span::raw("Start service"),
         ]),
         Line::from(vec![
-            Span::styled("  r       ", key_style), Span::raw("Restart service"),
+            Span::styled("  r       ", key_style),
+            Span::raw("Restart service"),
         ]),
         Line::from(vec![
-            Span::styled("  d       ", key_style), Span::raw("Delete service"),
+            Span::styled("  d       ", key_style),
+            Span::raw("Delete service"),
         ]),
         Line::from(vec![
-            Span::styled("  q       ", key_style), Span::raw("Quit"),
+            Span::styled("  q       ", key_style),
+            Span::raw("Quit"),
         ]),
     ];
 
@@ -546,11 +573,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
 }
 
 fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {
-    let width = (message.len() as u16 + 6).min(area.width.saturating_sub(4));
-    let height = 5;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
+    let dialog_area = centered_overlay(area, message.len() as u16 + 6, 5);
 
     f.render_widget(Clear, dialog_area);
 
@@ -558,9 +581,17 @@ fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {
         Line::raw(""),
         Line::from(vec![Span::raw(format!(" {} ", message))]),
         Line::from(vec![
-            Span::styled(" [y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [y]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Yes  "),
-            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[n]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" No "),
         ]),
     ];
@@ -578,11 +609,7 @@ fn draw_confirm_dialog(f: &mut Frame, message: &str, area: Rect) {
 fn draw_wizard(f: &mut Frame, state: &super::wizard::WizardState, area: Rect) {
     use super::wizard::WizardStep;
 
-    let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 16u16.min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let overlay_area = Rect::new(x, y, width, height);
+    let overlay_area = centered_overlay(area, 50, 16);
 
     f.render_widget(Clear, overlay_area);
 
@@ -680,9 +707,7 @@ fn draw_wizard(f: &mut Frame, state: &super::wizard::WizardState, area: Rect) {
                 Span::raw(" Confirm  "),
                 Span::styled(
                     "[Esc]",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" Back"),
             ]));

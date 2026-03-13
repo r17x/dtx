@@ -69,10 +69,8 @@ impl LogStore {
                     .open(&path)
                     .unwrap_or_else(|e| {
                         tracing::warn!("Failed to open log file {}: {}", path.display(), e);
-                        File::create(
-                            std::env::temp_dir().join(format!("dtx-{}.log", log.service)),
-                        )
-                        .expect("Failed to create temp log file")
+                        File::create(std::env::temp_dir().join(format!("dtx-{}.log", log.service)))
+                            .expect("Failed to create temp log file")
                     });
                 let total_lines = count_lines(&path).unwrap_or(0);
                 ServiceLogFile {
@@ -84,7 +82,6 @@ impl LogStore {
 
             let prefix = if log.is_stderr { "ERR" } else { "OUT" };
             if writeln!(file.writer, "[{}] {}", prefix, log.content).is_ok() {
-                let _ = file.writer.flush();
                 file.total_lines += 1;
             }
         }
@@ -115,13 +112,26 @@ impl LogStore {
         filtered[start..end].to_vec()
     }
 
+    /// Flush all file writers to disk.
+    #[allow(dead_code)]
+    pub fn flush(&mut self) {
+        for file in self.files.values_mut() {
+            let _ = file.writer.flush();
+        }
+    }
+
     /// Load logs from disk for deep scrollback beyond the recent buffer.
+    #[allow(dead_code)]
     pub fn load_from_disk(
-        &self,
+        &mut self,
         service: &str,
         start_line: usize,
         count: usize,
     ) -> io::Result<Vec<DisplayLog>> {
+        // Flush to ensure all data is on disk before reading
+        if let Some(file) = self.files.get_mut(service) {
+            let _ = file.writer.flush();
+        }
         let file = match self.files.get(service) {
             Some(f) => f,
             None => return Ok(Vec::new()),
@@ -153,6 +163,7 @@ impl LogStore {
     }
 
     /// Total number of log lines for a service (or all).
+    #[allow(dead_code)]
     pub fn total_lines(&self, service: Option<&str>) -> usize {
         match service {
             Some(name) => self.files.get(name).map(|f| f.total_lines).unwrap_or(0),
@@ -172,10 +183,14 @@ impl LogStore {
     pub fn filtered_count_with_predicate(&self, service: Option<&str>, filter: &str) -> usize {
         let filter_lower = filter.to_lowercase();
         match service {
-            Some(name) => self.recent.iter()
+            Some(name) => self
+                .recent
+                .iter()
                 .filter(|l| l.service == name && l.content.to_lowercase().contains(&filter_lower))
                 .count(),
-            None => self.recent.iter()
+            None => self
+                .recent
+                .iter()
                 .filter(|l| l.content.to_lowercase().contains(&filter_lower))
                 .count(),
         }
@@ -191,11 +206,13 @@ impl LogStore {
     ) -> Vec<&DisplayLog> {
         let filter_lower = filter.to_lowercase();
         let filtered: Vec<&DisplayLog> = if let Some(name) = service {
-            self.recent.iter()
+            self.recent
+                .iter()
                 .filter(|l| l.service == name && l.content.to_lowercase().contains(&filter_lower))
                 .collect()
         } else {
-            self.recent.iter()
+            self.recent
+                .iter()
                 .filter(|l| l.content.to_lowercase().contains(&filter_lower))
                 .collect()
         };

@@ -1,5 +1,6 @@
 //! Service add/edit wizard for TUI.
 
+use dtx_core::domain::{Port, ServiceName, ShellCommand};
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -119,43 +120,32 @@ impl WizardState {
     fn validate_step(&mut self) -> bool {
         self.error = None;
         match self.step {
-            WizardStep::Name => {
-                let name = self.name.trim();
-                if name.is_empty() {
-                    self.error = Some("Name cannot be empty".to_string());
-                    return false;
+            WizardStep::Name => match self.name.trim().parse::<ServiceName>() {
+                Ok(_) => true,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    false
                 }
-                if name.len() < 2 || name.len() > 63 {
-                    self.error = Some("Name must be 2-63 characters".to_string());
-                    return false;
+            },
+            WizardStep::Command => match self.command.trim().parse::<ShellCommand>() {
+                Ok(_) => true,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    false
                 }
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                {
-                    self.error =
-                        Some("Name: lowercase letters, digits, hyphens only".to_string());
-                    return false;
-                }
-                true
-            }
-            WizardStep::Command => {
-                if self.command.trim().is_empty() {
-                    self.error = Some("Command cannot be empty".to_string());
-                    return false;
-                }
-                true
-            }
+            },
             WizardStep::Port => {
                 if self.port.is_empty() {
                     return true; // port is optional
                 }
                 match self.port.parse::<u16>() {
-                    Ok(p) if p >= 1024 => true,
-                    Ok(_) => {
-                        self.error = Some("Port must be >= 1024".to_string());
-                        false
-                    }
+                    Ok(p) => match Port::try_from(p) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            self.error = Some(e.to_string());
+                            false
+                        }
+                    },
                     Err(_) => {
                         self.error = Some("Invalid port number".to_string());
                         false

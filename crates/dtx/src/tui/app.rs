@@ -96,7 +96,9 @@ pub enum DisplayHealth {
     #[default]
     Unknown,
     Healthy,
-    Unhealthy { reason: String },
+    Unhealthy {
+        reason: String,
+    },
 }
 
 /// Log scroll state for PgUp/PgDn navigation.
@@ -107,7 +109,10 @@ pub struct LogScroll {
 
 impl LogScroll {
     pub fn new() -> Self {
-        Self { offset_from_bottom: 0, following: true }
+        Self {
+            offset_from_bottom: 0,
+            following: true,
+        }
     }
 
     pub fn scroll_up(&mut self, lines: usize, total: usize) {
@@ -133,10 +138,19 @@ impl LogScroll {
 pub enum UiMode {
     #[default]
     Normal,
-    Search { query: String, cursor: usize },
-    Filter { query: String, cursor: usize },
+    Search {
+        query: String,
+        cursor: usize,
+    },
+    Filter {
+        query: String,
+        cursor: usize,
+    },
     Detail,
-    Confirm { action: ConfirmAction, message: String },
+    Confirm {
+        action: ConfirmAction,
+        message: String,
+    },
     Help,
     Wizard(Box<super::wizard::WizardState>),
 }
@@ -158,7 +172,6 @@ pub struct ServiceDetail {
     pub name: String,
     pub state: DisplayState,
     pub health: DisplayHealth,
-    pub pid: Option<u32>,
     pub port: Option<u16>,
     pub uptime: Option<Duration>,
     pub restart_count: u32,
@@ -210,7 +223,10 @@ impl App {
             service_states.insert(name.clone(), DisplayState::Pending);
             restart_counts.insert(name.clone(), 0);
         }
-        let health_states = service_names.iter().map(|n| (n.clone(), DisplayHealth::Unknown)).collect();
+        let health_states = service_names
+            .iter()
+            .map(|n| (n.clone(), DisplayHealth::Unknown))
+            .collect();
 
         Self {
             service_names,
@@ -267,7 +283,9 @@ impl App {
             }
             LifecycleEvent::Running { id, pid, .. } => {
                 let name = id.to_string();
-                self.started_at.entry(name.clone()).or_insert_with(Instant::now);
+                self.started_at
+                    .entry(name.clone())
+                    .or_insert_with(Instant::now);
                 self.service_states.insert(
                     name,
                     DisplayState::Running {
@@ -287,7 +305,8 @@ impl App {
                     self.service_states
                         .insert(name.clone(), DisplayState::Completed { exit_code: code });
                 } else {
-                    self.service_states.insert(name.clone(), DisplayState::Stopped);
+                    self.service_states
+                        .insert(name.clone(), DisplayState::Stopped);
                 }
                 self.started_at.remove(&name);
             }
@@ -320,10 +339,12 @@ impl App {
                 self.status_message = Some("Config changed — press 'a' to reload".to_string());
             }
             LifecycleEvent::HealthCheckPassed { id, .. } => {
-                self.health_states.insert(id.to_string(), DisplayHealth::Healthy);
+                self.health_states
+                    .insert(id.to_string(), DisplayHealth::Healthy);
             }
             LifecycleEvent::HealthCheckFailed { id, reason, .. } => {
-                self.health_states.insert(id.to_string(), DisplayHealth::Unhealthy { reason });
+                self.health_states
+                    .insert(id.to_string(), DisplayHealth::Unhealthy { reason });
             }
             LifecycleEvent::DependencyWaiting { .. }
             | LifecycleEvent::DependencyResolved { .. } => {}
@@ -352,7 +373,9 @@ impl App {
     pub fn filtered_log_count(&self) -> usize {
         let service = self.selected_service();
         match &self.active_filter {
-            Some(filter) => self.log_store.filtered_count_with_predicate(service, filter),
+            Some(filter) => self
+                .log_store
+                .filtered_count_with_predicate(service, filter),
             None => self.log_store.filtered_count(service),
         }
     }
@@ -368,18 +391,17 @@ impl App {
             Some(n) => n.to_string(),
             None => return,
         };
-        let state = self.service_states.get(&name).cloned().unwrap_or(DisplayState::Pending);
-        let pid = match &state {
-            DisplayState::Running { pid } => Some(*pid),
-            _ => None,
-        };
+        let state = self
+            .service_states
+            .get(&name)
+            .cloned()
+            .unwrap_or(DisplayState::Pending);
         let uptime = self.started_at.get(&name).map(|t| t.elapsed());
 
         self.detail = Some(ServiceDetail {
             name: name.clone(),
             state,
             health: self.health(&name).clone(),
-            pid,
             port: self.service_ports.get(&name).copied(),
             uptime,
             restart_count: *self.restart_counts.get(&name).unwrap_or(&0),
@@ -419,20 +441,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Char('r') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    self.status_message = Some(format!("Restarting {}...", name));
-                    return Some(TuiAction::Restart(name));
-                }
-                None
-            }
-            KeyCode::Char('s') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    self.status_message = Some(format!("Stopping {}...", name));
-                    return Some(TuiAction::Stop(name));
-                }
-                None
-            }
+            KeyCode::Char('r') | KeyCode::Char('s') => return self.handle_service_action(key),
             KeyCode::Char('a') if self.config_changed => {
                 self.config_changed = false;
                 self.status_message = Some("Reloading config...".to_string());
@@ -480,7 +489,10 @@ impl App {
                 None
             }
             KeyCode::Char('/') => {
-                self.mode = UiMode::Search { query: String::new(), cursor: 0 };
+                self.mode = UiMode::Search {
+                    query: String::new(),
+                    cursor: 0,
+                };
                 None
             }
             KeyCode::Char('n') => {
@@ -494,19 +506,13 @@ impl App {
             KeyCode::Char('F') => {
                 let initial = self.active_filter.clone().unwrap_or_default();
                 let cursor = initial.len();
-                self.mode = UiMode::Filter { query: initial, cursor };
+                self.mode = UiMode::Filter {
+                    query: initial,
+                    cursor,
+                };
                 None
             }
-            KeyCode::Char('S') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    if matches!(self.service_states.get(&name),
-                        Some(DisplayState::Stopped | DisplayState::Completed { .. } | DisplayState::Failed { .. })) {
-                        self.status_message = Some(format!("Starting {}...", name));
-                        return Some(TuiAction::Start(name));
-                    }
-                }
-                None
-            }
+            KeyCode::Char('S') => return self.handle_service_action(key),
             KeyCode::Char('g') => {
                 self.selected = 0;
                 None
@@ -580,7 +586,9 @@ impl App {
     fn handle_key_confirm(&mut self, key: KeyCode) -> Option<TuiAction> {
         match key {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let UiMode::Confirm { action, .. } = std::mem::replace(&mut self.mode, UiMode::Normal) {
+                if let UiMode::Confirm { action, .. } =
+                    std::mem::replace(&mut self.mode, UiMode::Normal)
+                {
                     match action {
                         ConfirmAction::Delete(name) => {
                             self.status_message = Some(format!("Deleting {}...", name));
@@ -599,6 +607,47 @@ impl App {
         }
     }
 
+    /// Edit text input in the current mode (shared by Search and Filter).
+    /// Returns true if the key was handled as a text-editing key.
+    fn handle_text_input(&mut self, key: KeyCode) -> bool {
+        let (query, cursor) = match self.mode {
+            UiMode::Search {
+                ref mut query,
+                ref mut cursor,
+            }
+            | UiMode::Filter {
+                ref mut query,
+                ref mut cursor,
+            } => (query, cursor),
+            _ => return false,
+        };
+        match key {
+            KeyCode::Backspace => {
+                if *cursor > 0 {
+                    query.remove(*cursor - 1);
+                    *cursor -= 1;
+                }
+                true
+            }
+            KeyCode::Char(c) => {
+                query.insert(*cursor, c);
+                *cursor += 1;
+                true
+            }
+            KeyCode::Left => {
+                *cursor = cursor.saturating_sub(1);
+                true
+            }
+            KeyCode::Right => {
+                if *cursor < query.len() {
+                    *cursor += 1;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_key_search(&mut self, key: KeyCode) -> Option<TuiAction> {
         match key {
             KeyCode::Enter => {
@@ -609,37 +658,10 @@ impl App {
                 self.mode = UiMode::Normal;
                 None
             }
-            KeyCode::Backspace => {
-                if let UiMode::Search { ref mut query, ref mut cursor } = self.mode {
-                    if *cursor > 0 {
-                        query.remove(*cursor - 1);
-                        *cursor -= 1;
-                    }
-                }
+            _ => {
+                self.handle_text_input(key);
                 None
             }
-            KeyCode::Char(c) => {
-                if let UiMode::Search { ref mut query, ref mut cursor } = self.mode {
-                    query.insert(*cursor, c);
-                    *cursor += 1;
-                }
-                None
-            }
-            KeyCode::Left => {
-                if let UiMode::Search { ref mut cursor, .. } = self.mode {
-                    *cursor = cursor.saturating_sub(1);
-                }
-                None
-            }
-            KeyCode::Right => {
-                if let UiMode::Search { ref query, ref mut cursor } = self.mode {
-                    if *cursor < query.len() {
-                        *cursor += 1;
-                    }
-                }
-                None
-            }
-            _ => None,
         }
     }
 
@@ -666,32 +688,42 @@ impl App {
                 self.mode = UiMode::Normal;
                 None
             }
-            KeyCode::Backspace => {
-                if let UiMode::Filter { ref mut query, ref mut cursor } = self.mode {
-                    if *cursor > 0 {
-                        query.remove(*cursor - 1);
-                        *cursor -= 1;
-                    }
+            _ => {
+                self.handle_text_input(key);
+                None
+            }
+        }
+    }
+
+    /// Handle service control keys (r/s/S) — shared by Normal and Detail modes.
+    fn handle_service_action(&mut self, key: KeyCode) -> Option<TuiAction> {
+        match key {
+            KeyCode::Char('r') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    self.status_message = Some(format!("Restarting {}...", name));
+                    return Some(TuiAction::Restart(name));
                 }
                 None
             }
-            KeyCode::Char(c) => {
-                if let UiMode::Filter { ref mut query, ref mut cursor } = self.mode {
-                    query.insert(*cursor, c);
-                    *cursor += 1;
+            KeyCode::Char('s') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    self.status_message = Some(format!("Stopping {}...", name));
+                    return Some(TuiAction::Stop(name));
                 }
                 None
             }
-            KeyCode::Left => {
-                if let UiMode::Filter { ref mut cursor, .. } = self.mode {
-                    *cursor = cursor.saturating_sub(1);
-                }
-                None
-            }
-            KeyCode::Right => {
-                if let UiMode::Filter { ref query, ref mut cursor } = self.mode {
-                    if *cursor < query.len() {
-                        *cursor += 1;
+            KeyCode::Char('S') => {
+                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
+                    if matches!(
+                        self.service_states.get(&name),
+                        Some(
+                            DisplayState::Stopped
+                                | DisplayState::Completed { .. }
+                                | DisplayState::Failed { .. }
+                        )
+                    ) {
+                        self.status_message = Some(format!("Starting {}...", name));
+                        return Some(TuiAction::Start(name));
                     }
                 }
                 None
@@ -725,29 +757,8 @@ impl App {
                 }
                 None
             }
-            KeyCode::Char('r') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    self.status_message = Some(format!("Restarting {}...", name));
-                    return Some(TuiAction::Restart(name));
-                }
-                None
-            }
-            KeyCode::Char('s') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    self.status_message = Some(format!("Stopping {}...", name));
-                    return Some(TuiAction::Stop(name));
-                }
-                None
-            }
-            KeyCode::Char('S') => {
-                if let Some(name) = self.selected_service().map(|s| s.to_string()) {
-                    if matches!(self.service_states.get(&name),
-                        Some(DisplayState::Stopped | DisplayState::Completed { .. } | DisplayState::Failed { .. })) {
-                        self.status_message = Some(format!("Starting {}...", name));
-                        return Some(TuiAction::Start(name));
-                    }
-                }
-                None
+            KeyCode::Char('r') | KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.handle_service_action(key)
             }
             _ => None,
         }
@@ -765,7 +776,8 @@ impl App {
         }
         let query_lower = query.to_lowercase();
         let selected_service = self.selected_service().map(|s| s.to_string());
-        let matches: Vec<usize> = self.log_store
+        let matches: Vec<usize> = self
+            .log_store
             .get_visible(selected_service.as_deref(), 0, usize::MAX)
             .iter()
             .enumerate()
@@ -872,6 +884,33 @@ impl App {
     }
 }
 
+/// Build a ResourceConfig from a WizardResult (used by AddService and EditService).
+fn wizard_result_to_resource_config(
+    result: &super::wizard::WizardResult,
+) -> dtx_core::config::schema::ResourceConfig {
+    use dtx_core::config::schema::DependencyConfig;
+    let mut rc = dtx_core::config::schema::ResourceConfig {
+        command: Some(result.command.clone()),
+        port: result.port,
+        ..Default::default()
+    };
+    if !result.deps.is_empty() {
+        rc.depends_on = result
+            .deps
+            .iter()
+            .map(|d| DependencyConfig::Simple(d.clone()))
+            .collect();
+    }
+    rc
+}
+
+/// Merge nix env into a ProcessResourceConfig (user env takes precedence).
+fn apply_nix_env(config: &mut ProcessResourceConfig, nix_env: &HashMap<String, String>) {
+    let user_env = std::mem::take(&mut config.environment);
+    config.environment = nix_env.clone();
+    config.environment.extend(user_env);
+}
+
 /// Convert a Service to a ProcessResourceConfig.
 fn service_to_config(service: &Service, project_dir: &PathBuf) -> ProcessResourceConfig {
     let mut config = ProcessResourceConfig::new(&service.name, &service.command);
@@ -940,9 +979,7 @@ pub async fn run_tui(
     for service in &enabled_services {
         let mut config = service_to_config(service, &project_dir);
         if let Some(ref env) = nix_env {
-            let user_env = std::mem::take(&mut config.environment);
-            config.environment = env.clone();
-            config.environment.extend(user_env);
+            apply_nix_env(&mut config, env);
         }
         orchestrator.add_resource(config);
     }
@@ -999,6 +1036,7 @@ pub async fn run_tui(
     // Main loop
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
+    let mut tick_count: u64 = 0;
 
     loop {
         // Poll events from ResourceEventBus
@@ -1007,8 +1045,11 @@ pub async fn run_tui(
         // Poll all processes for output (they publish to EventBus)
         orchestrator.poll().await;
 
-        // Sync state from orchestrator
-        app.sync_from_orchestrator(&orchestrator).await;
+        // Sync state from orchestrator (every ~1s, not every tick)
+        tick_count += 1;
+        if tick_count % 10 == 0 {
+            app.sync_from_orchestrator(&orchestrator).await;
+        }
 
         // Get service infos for rendering
         let service_infos = app.service_infos();
@@ -1086,7 +1127,6 @@ pub async fn run_tui(
                     }
                 }
                 TuiAction::Delete(name) => {
-                    // Stop the service first if running
                     let id = ResourceId::new(&name);
                     if let Some(resource) = orchestrator.get_resource(&id) {
                         let mut resource = resource.write().await;
@@ -1094,42 +1134,29 @@ pub async fn run_tui(
                         let _ = resource.stop(&ctx).await;
                     }
 
-                    // Remove from config store
                     match ConfigStore::discover_and_load() {
-                        Ok(mut store) => {
-                            match store.remove_resource(&name) {
-                                Ok(_) => {
-                                    if let Err(e) = store.save() {
-                                        app.set_status(format!("Failed to save: {}", e));
-                                    } else {
-                                        app.remove_service(&name);
-                                        app.set_status(format!("Deleted {}", name));
-                                    }
+                        Ok(mut store) => match store.remove_resource(&name) {
+                            Ok(_) => {
+                                if let Err(e) = store.save() {
+                                    app.set_status(format!("Failed to save: {}", e));
+                                } else {
+                                    app.remove_service(&name);
+                                    app.set_status(format!("Deleted {}", name));
                                 }
-                                Err(e) => app.set_status(format!("Failed to delete: {}", e)),
                             }
+                            Err(e) => {
+                                app.set_status(format!("Failed to delete: {}", e))
+                            }
+                        },
+                        Err(e) => {
+                            app.set_status(format!("Failed to load config: {}", e))
                         }
-                        Err(e) => app.set_status(format!("Failed to load config: {}", e)),
                     }
                 }
                 TuiAction::AddService(result) => {
-                    use dtx_core::config::schema::ResourceConfig;
-
                     match ConfigStore::discover_and_load() {
                         Ok(mut store) => {
-                            let mut rc = ResourceConfig {
-                                command: Some(result.command.clone()),
-                                port: result.port,
-                                ..Default::default()
-                            };
-                            if !result.deps.is_empty() {
-                                use dtx_core::config::schema::DependencyConfig;
-                                rc.depends_on = result
-                                    .deps
-                                    .iter()
-                                    .map(|d| DependencyConfig::Simple(d.clone()))
-                                    .collect();
-                            }
+                            let rc = wizard_result_to_resource_config(&result);
                             if let Err(e) = store.add_resource(&result.name, rc) {
                                 app.set_status(format!("Failed to add: {}", e));
                             } else if let Err(e) = store.save() {
@@ -1163,9 +1190,7 @@ pub async fn run_tui(
                                 };
                                 let mut config = service_to_config(&svc, &project_dir);
                                 if let Some(ref env) = nix_env {
-                                    let user_env = std::mem::take(&mut config.environment);
-                                    config.environment = env.clone();
-                                    config.environment.extend(user_env);
+                                    apply_nix_env(&mut config, env);
                                 }
                                 orchestrator.add_resource(config);
                                 app.add_service(result.name.clone());
@@ -1200,19 +1225,7 @@ pub async fn run_tui(
                     match ConfigStore::discover_and_load() {
                         Ok(mut store) => {
                             let _ = store.remove_resource(&original_name);
-                            let mut rc = dtx_core::config::schema::ResourceConfig {
-                                command: Some(result.command.clone()),
-                                port: result.port,
-                                ..Default::default()
-                            };
-                            if !result.deps.is_empty() {
-                                use dtx_core::config::schema::DependencyConfig;
-                                rc.depends_on = result
-                                    .deps
-                                    .iter()
-                                    .map(|d| DependencyConfig::Simple(d.clone()))
-                                    .collect();
-                            }
+                            let rc = wizard_result_to_resource_config(&result);
                             if let Err(e) = store.add_resource(&result.name, rc) {
                                 app.set_status(format!("Failed to update: {}", e));
                             } else if let Err(e) = store.save() {
@@ -1246,9 +1259,7 @@ pub async fn run_tui(
                                 let svc = Service::from_resource_config(name, rc);
                                 let mut config = service_to_config(&svc, &project_dir);
                                 if let Some(ref env) = nix_env {
-                                    let user_env = std::mem::take(&mut config.environment);
-                                    config.environment = env.clone();
-                                    config.environment.extend(user_env);
+                                    apply_nix_env(&mut config, env);
                                 }
                                 orchestrator.add_resource(config);
                                 app.add_service(name.to_string());
