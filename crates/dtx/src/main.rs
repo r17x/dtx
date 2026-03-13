@@ -537,25 +537,25 @@ async fn run(out: &output::Output) -> Result<()> {
 
         Commands::Code { command } => {
             return match command {
-                CodeCommands::Symbols { file } => cmd::code::symbols(&out, file).await,
-                CodeCommands::Find { pattern, path } => cmd::code::find(&out, pattern, path).await,
+                CodeCommands::Symbols { file } => cmd::code::symbols(out, file).await,
+                CodeCommands::Find { pattern, path } => cmd::code::find(out, pattern, path).await,
                 CodeCommands::Search { pattern, glob } => {
-                    cmd::code::search(&out, pattern, glob).await
+                    cmd::code::search(out, pattern, glob).await
                 }
             };
         }
 
         Commands::Memory { command } => {
             return match command {
-                MemoryCommands::List => cmd::memory::list(&out).await,
-                MemoryCommands::Read { name } => cmd::memory::read(&out, name).await,
+                MemoryCommands::List => cmd::memory::list(out).await,
+                MemoryCommands::Read { name } => cmd::memory::read(out, name).await,
                 MemoryCommands::Write {
                     name,
                     content,
                     kind,
                     description,
-                } => cmd::memory::write(&out, name, content, kind, description).await,
-                MemoryCommands::Delete { name } => cmd::memory::delete(&out, name).await,
+                } => cmd::memory::write(out, name, content, kind, description).await,
+                MemoryCommands::Delete { name } => cmd::memory::delete(out, name).await,
             };
         }
 

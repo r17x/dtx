@@ -87,7 +87,8 @@ pub fn search(store: &MemoryStore, filter: &MemoryFilter) -> crate::Result<Vec<M
             Ok(t) => t,
             Err(_) => continue,
         };
-        let memory = match crate::types::Memory::from_file_content(&text) {
+        let name = crate::store::name_from_path(&path);
+        let memory = match crate::types::Memory::from_file_content(&text, &name) {
             Ok(m) => m,
             Err(_) => continue,
         };

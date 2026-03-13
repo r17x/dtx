@@ -371,10 +371,10 @@ def standalone_fn():
         let files = ws.list_files();
         assert!(files
             .iter()
-            .any(|f| f.extension().map_or(false, |e| e == "rs")));
+            .any(|f| f.extension().is_some_and(|e| e == "rs")));
         assert!(files
             .iter()
-            .any(|f| f.extension().map_or(false, |e| e == "py")));
+            .any(|f| f.extension().is_some_and(|e| e == "py")));
     }
 
     #[test]

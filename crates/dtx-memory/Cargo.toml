@@ -17,7 +17,6 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fs2 = { workspace = true }
-regex = { workspace = true }
 dtx-core = { workspace = true }
 
 [dev-dependencies]

@@ -1188,7 +1188,6 @@ dependencies = [
  "chrono",
  "dtx-core",
  "fs2",
- "regex",
  "serde",
  "serde_yaml",
  "tempfile",

@@ -3,9 +3,6 @@ pub enum MemoryError {
     #[error("Memory not found: {0}")]
     NotFound(String),
 
-    #[error("Invalid memory name: {0}")]
-    InvalidName(String),
-
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

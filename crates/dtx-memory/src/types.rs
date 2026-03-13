@@ -59,23 +59,35 @@ impl Memory {
         format!("---\n{}---\n\n{}\n", frontmatter, self.content.trim())
     }
 
-    pub fn from_file_content(text: &str) -> crate::Result<Self> {
-        let text = text.trim_start();
-        if !text.starts_with("---") {
-            return Err(crate::MemoryError::Frontmatter(
-                "Missing opening ---".into(),
-            ));
+    /// Parse a memory from file content. If frontmatter is present, parse it.
+    /// Otherwise treat the entire content as the body with a default meta derived from `name`.
+    pub fn from_file_content(text: &str, name: &str) -> crate::Result<Self> {
+        let trimmed = text.trim_start();
+        if let Some(after_marker) = trimmed.strip_prefix("---") {
+            let after_first = after_marker.trim_start_matches('\n');
+            let end = after_first
+                .find("\n---")
+                .ok_or_else(|| crate::MemoryError::Frontmatter("Missing closing ---".into()))?;
+            let yaml_str = &after_first[..end];
+            let content_start = end + 4; // skip "\n---"
+            let content = after_first[content_start..].trim().to_string();
+            let meta: MemoryMeta = serde_yaml::from_str(yaml_str)
+                .map_err(|e| crate::MemoryError::Frontmatter(e.to_string()))?;
+            Ok(Self { meta, content })
+        } else {
+            let now = chrono::Utc::now();
+            Ok(Self {
+                meta: MemoryMeta {
+                    name: name.to_string(),
+                    kind: MemoryKind::Project,
+                    description: None,
+                    created_at: now,
+                    updated_at: now,
+                    tags: vec![],
+                },
+                content: trimmed.to_string(),
+            })
         }
-        let after_first = &text[3..].trim_start_matches('\n');
-        let end = after_first
-            .find("\n---")
-            .ok_or_else(|| crate::MemoryError::Frontmatter("Missing closing ---".into()))?;
-        let yaml_str = &after_first[..end];
-        let content_start = end + 4; // skip "\n---"
-        let content = after_first[content_start..].trim().to_string();
-        let meta: MemoryMeta = serde_yaml::from_str(yaml_str)
-            .map_err(|e| crate::MemoryError::Frontmatter(e.to_string()))?;
-        Ok(Self { meta, content })
     }
 }
 
@@ -102,7 +114,8 @@ mod tests {
     fn frontmatter_roundtrip() {
         let original = sample_memory();
         let serialized = original.to_file_content();
-        let parsed = Memory::from_file_content(&serialized).expect("parse should succeed");
+        let parsed =
+            Memory::from_file_content(&serialized, "test-memory").expect("parse should succeed");
 
         assert_eq!(parsed.meta.name, original.meta.name);
         assert_eq!(parsed.meta.kind, original.meta.kind);
@@ -125,21 +138,25 @@ mod tests {
             content: "Just content.".to_string(),
         };
         let serialized = mem.to_file_content();
-        let parsed = Memory::from_file_content(&serialized).expect("parse should succeed");
+        let parsed =
+            Memory::from_file_content(&serialized, "minimal").expect("parse should succeed");
         assert_eq!(parsed.meta.name, "minimal");
         assert!(parsed.meta.description.is_none());
         assert!(parsed.meta.tags.is_empty());
     }
 
     #[test]
-    fn frontmatter_missing_opening() {
-        let result = Memory::from_file_content("no frontmatter here");
-        assert!(result.is_err());
+    fn plain_markdown_without_frontmatter() {
+        let result = Memory::from_file_content("no frontmatter here", "my-note");
+        let mem = result.expect("should succeed for plain markdown");
+        assert_eq!(mem.meta.name, "my-note");
+        assert_eq!(mem.meta.kind, MemoryKind::Project);
+        assert_eq!(mem.content, "no frontmatter here");
     }
 
     #[test]
     fn frontmatter_missing_closing() {
-        let result = Memory::from_file_content("---\nname: test\n");
+        let result = Memory::from_file_content("---\nname: test\n", "test");
         assert!(result.is_err());
     }
 

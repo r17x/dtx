@@ -1,18 +1,37 @@
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
+use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use regex::Regex;
 use tracing::debug;
 
 use crate::error::{MemoryError, Result};
 use crate::types::{Memory, MemoryMeta};
 
-static KEBAB_CASE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$").expect("valid regex"));
-
 pub struct MemoryStore {
     root: PathBuf,
+}
+
+/// Derive a memory name from a file path by stripping the `.md` extension.
+pub(crate) fn name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Use file metadata timestamps for memories parsed from plain markdown (no frontmatter).
+fn enrich_timestamps_from_file(memory: &mut Memory, path: &Path) {
+    if memory.meta.description.is_some() {
+        return; // Has frontmatter — timestamps are already from YAML
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        let modified: DateTime<Utc> = meta
+            .modified()
+            .map(DateTime::from)
+            .unwrap_or_else(|_| Utc::now());
+        memory.meta.updated_at = modified;
+        memory.meta.created_at = meta.created().map(DateTime::from).unwrap_or(modified);
+    }
 }
 
 impl MemoryStore {
@@ -29,15 +48,6 @@ impl MemoryStore {
         self.root.join(format!("{name}.md"))
     }
 
-    pub fn validate_name(name: &str) -> Result<()> {
-        if name.len() < 2 || name.len() > 63 || !KEBAB_CASE_RE.is_match(name) {
-            return Err(MemoryError::InvalidName(format!(
-                "'{name}' must be 2-63 chars, kebab-case (lowercase alphanumeric + hyphens, no leading/trailing hyphens)"
-            )));
-        }
-        Ok(())
-    }
-
     pub fn list(&self) -> Result<Vec<MemoryMeta>> {
         let dir = self.memories_dir();
         if !dir.exists() {
@@ -49,9 +59,13 @@ impl MemoryStore {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let name = name_from_path(&path);
                 let text = std::fs::read_to_string(&path)?;
-                match Memory::from_file_content(&text) {
-                    Ok(mem) => metas.push(mem.meta),
+                match Memory::from_file_content(&text, &name) {
+                    Ok(mut mem) => {
+                        enrich_timestamps_from_file(&mut mem, &path);
+                        metas.push(mem.meta);
+                    }
                     Err(e) => {
                         debug!("Skipping malformed memory file {}: {}", path.display(), e);
                     }
@@ -68,12 +82,12 @@ impl MemoryStore {
             return Err(MemoryError::NotFound(name.to_string()));
         }
         let text = std::fs::read_to_string(&path)?;
-        Memory::from_file_content(&text)
+        let mut mem = Memory::from_file_content(&text, name)?;
+        enrich_timestamps_from_file(&mut mem, &path);
+        Ok(mem)
     }
 
     pub fn write(&self, memory: &Memory) -> Result<()> {
-        Self::validate_name(&memory.meta.name)?;
-
         let path = self.memory_path(&memory.meta.name);
         let tmp_path = path.with_extension("md.tmp");
         let lock_path = path.with_extension("md.lock");
@@ -86,9 +100,10 @@ impl MemoryStore {
         lock_file.lock_exclusive()?;
 
         // Preserve created_at from existing memory on overwrite
+        let name = &memory.meta.name;
         let to_write = match std::fs::read_to_string(&path)
             .ok()
-            .and_then(|t| Memory::from_file_content(&t).ok())
+            .and_then(|t| Memory::from_file_content(&t, name).ok())
         {
             Some(existing) => {
                 let mut updated = memory.clone();
@@ -102,7 +117,7 @@ impl MemoryStore {
         std::fs::write(&tmp_path, &content)?;
         std::fs::rename(&tmp_path, &path)?;
 
-        lock_file.unlock()?;
+        drop(lock_file);
         let _ = std::fs::remove_file(&lock_path);
 
         dtx_core::events::socket::notify_memory_changed_sync("", &memory.meta.name);
@@ -149,26 +164,6 @@ mod tests {
             },
             content: "Hello world".to_string(),
         }
-    }
-
-    #[test]
-    fn validate_name_accepts_valid() {
-        assert!(MemoryStore::validate_name("ab").is_ok());
-        assert!(MemoryStore::validate_name("my-memory").is_ok());
-        assert!(MemoryStore::validate_name("test-123-foo").is_ok());
-        assert!(MemoryStore::validate_name("a1").is_ok());
-    }
-
-    #[test]
-    fn validate_name_rejects_invalid() {
-        assert!(MemoryStore::validate_name("a").is_err()); // too short
-        assert!(MemoryStore::validate_name("A").is_err()); // uppercase
-        assert!(MemoryStore::validate_name("My-Memory").is_err()); // uppercase
-        assert!(MemoryStore::validate_name("-leading").is_err());
-        assert!(MemoryStore::validate_name("trailing-").is_err());
-        assert!(MemoryStore::validate_name("has space").is_err());
-        assert!(MemoryStore::validate_name("has_underscore").is_err());
-        assert!(MemoryStore::validate_name("").is_err());
     }
 
     #[test]
@@ -249,5 +244,40 @@ mod tests {
 
         let read = store.read("overwrite-me").expect("read");
         assert_eq!(read.content, "Updated content");
+    }
+
+    #[test]
+    fn read_plain_markdown_without_frontmatter() {
+        let (_dir, store) = make_store();
+        let path = store.memory_path("plain-note");
+        std::fs::write(&path, "Just plain markdown content.\n\nNo frontmatter.").unwrap();
+
+        let mem = store.read("plain-note").expect("read plain md");
+        assert_eq!(mem.meta.name, "plain-note");
+        assert_eq!(mem.meta.kind, MemoryKind::Project);
+        assert!(mem.content.contains("Just plain markdown"));
+    }
+
+    #[test]
+    fn list_includes_plain_markdown() {
+        let (_dir, store) = make_store();
+        store
+            .write(&make_memory("with-frontmatter"))
+            .expect("write");
+        let path = store.memory_path("plain-file");
+        std::fs::write(&path, "No frontmatter here.").unwrap();
+
+        let metas = store.list().expect("list");
+        let names: Vec<_> = metas.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["plain-file", "with-frontmatter"]);
+    }
+
+    #[test]
+    fn accepts_any_filename() {
+        let (_dir, store) = make_store();
+        let mem = make_memory("has_underscores");
+        store.write(&mem).expect("write with underscores");
+        let read = store.read("has_underscores").expect("read");
+        assert_eq!(read.meta.name, "has_underscores");
     }
 }
