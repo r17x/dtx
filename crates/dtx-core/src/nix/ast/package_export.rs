@@ -5,8 +5,8 @@
 //! site with a reference (e.g. `self'.packages.vault-bootstrap`).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
+use std::path::PathBuf;
+use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::parser::parse_nix;
@@ -29,10 +29,7 @@ pub struct ExportResult {
 /// binding inside `packages = let ... in { ... }` (or `packages = { ... }` if no let block
 /// exists), and the original site is replaced with a reference matching any existing pattern
 /// found in the file (e.g. `self'.packages.<name>`).
-pub fn export_scripts_as_packages(
-    _flake_dir: &Path,
-    scripts: &[DetectedScript],
-) -> Result<ExportResult, NixError> {
+pub fn export_scripts_as_packages(scripts: &[DetectedScript]) -> Result<ExportResult, NixError> {
     if scripts.is_empty() {
         return Ok(ExportResult {
             modified_files: vec![],
@@ -172,8 +169,11 @@ fn process_file(
 fn detect_reference_prefix(content: &str) -> Option<String> {
     // Look for patterns like `<something>.command = <prefix>.<package-name>;`
     // where the prefix looks like a module path (e.g. self'.packages)
-    let re = Regex::new(r"\.command\s*=\s*([a-zA-Z_'][a-zA-Z_'.]*)\.[a-zA-Z_][a-zA-Z0-9_-]*\s*;")
-        .unwrap();
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\.command\s*=\s*([a-zA-Z_'][a-zA-Z_'.]*)\.[a-zA-Z_][a-zA-Z0-9_-]*\s*;")
+            .unwrap()
+    });
+    let re = &*RE;
 
     for cap in re.captures_iter(content) {
         let prefix = &cap[1];
@@ -211,7 +211,9 @@ fn build_replacement(attr_text: &str, reference: &str) -> String {
 
     // Find `command =` before the writeShell call
     let before_ws = &attr_text[..ws_pos];
-    let command_eq_re = Regex::new(r"command\s*=\s*\S*\s*$").unwrap();
+    static CMD_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"command\s*=\s*\S*\s*$").unwrap());
+    let command_eq_re = &*CMD_RE;
 
     if let Some(cmd_match) = command_eq_re.find(before_ws) {
         // Check if there's a `= {` before `command =` (nested attr set)
@@ -320,7 +322,8 @@ struct PackagesBlock {
 
 /// Find the `packages =` block, handling both `packages = { ... }` and `packages = let ... in { ... }`.
 fn find_packages_block(content: &str) -> Option<PackagesBlock> {
-    let re = Regex::new(r"(?m)^\s*packages\s*=").unwrap();
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\s*packages\s*=").unwrap());
+    let re = &*RE;
     let m = re.find(content)?;
     let after_eq = m.end();
 
@@ -471,9 +474,16 @@ fn find_matching_brace(content: &str, pos: usize) -> Option<usize> {
 
 /// Extract names of existing entries in a packages block body.
 fn extract_existing_package_names(block_body: &str) -> Vec<String> {
-    let re = Regex::new(r"(?m)^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*=").unwrap();
-    re.captures_iter(block_body)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+    // Match both unquoted (`foo =`) and quoted (`"foo" =`) attribute names
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"(?m)^\s*(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_-]*))\s*="#).unwrap()
+    });
+    RE.captures_iter(block_body)
+        .filter_map(|c| {
+            c.get(1)
+                .or_else(|| c.get(2))
+                .map(|m| m.as_str().to_string())
+        })
         .collect()
 }
 
@@ -496,7 +506,7 @@ fn detect_indent(content: &str, block: &PackagesBlock) -> String {
 mod tests {
     use super::super::script_detection::ScriptContext;
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn make_script(
         name: &str,
@@ -802,7 +812,7 @@ mod tests {
             (attr_start, attr_end),
         );
 
-        let result = export_scripts_as_packages(dir.path(), &[script]).unwrap();
+        let result = export_scripts_as_packages(&[script]).unwrap();
 
         assert_eq!(result.exported_packages, vec!["foo"]);
         assert_eq!(result.modified_files, vec![file_path.clone()]);

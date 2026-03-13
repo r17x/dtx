@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use once_cell::sync::Lazy;
 use regex::Regex;
 use rnix::SyntaxKind;
 
@@ -84,7 +85,10 @@ fn detect_in_file(
 ) {
     let parsed = match parse_nix(content) {
         Ok(p) => p,
-        Err(_) => return,
+        Err(e) => {
+            tracing::warn!("failed to parse {}: {}", file_path.display(), e);
+            return;
+        }
     };
 
     // Walk AST looking for NODE_APPLY nodes that are writeShellApplication/writeShellScriptBin calls
@@ -253,25 +257,20 @@ fn find_containing_attr(
             let start: usize = range.start().into();
             let end: usize = range.end().into();
             // Include the trailing semicolon if present
-            let end_with_semi = skip_trailing_semicolon(content, end);
+            let rest = &content[end..];
+            let trimmed = rest.trim_start();
+            let ws_len = rest.len() - trimmed.len();
+            let end_with_semi = if trimmed.starts_with(';') {
+                end + ws_len + 1
+            } else {
+                end
+            };
             let text = &content[start..end_with_semi];
             return Some((text.to_string(), (start, end_with_semi)));
         }
         current = parent.parent();
     }
     None
-}
-
-/// Advance past whitespace and a trailing semicolon.
-fn skip_trailing_semicolon(content: &str, pos: usize) -> usize {
-    let rest = &content[pos..];
-    let trimmed = rest.trim_start();
-    let whitespace_len = rest.len() - trimmed.len();
-    if trimmed.starts_with(';') {
-        pos + whitespace_len + 1
-    } else {
-        pos
-    }
 }
 
 /// Detect whether the node is inside a process-compose block and extract profile name.
@@ -297,7 +296,9 @@ fn detect_context(node: &rnix::SyntaxNode) -> ScriptContext {
 
 /// Extract profile name from an attrpath like `process-compose."dev"`.
 fn extract_profile_from_attrpath(path: &str) -> String {
-    let re = Regex::new(r#"process-compose\s*\.\s*"([^"]+)""#).unwrap();
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"process-compose\s*\.\s*"([^"]+)""#).unwrap());
+    let re = &*RE;
     if let Some(caps) = re.captures(path) {
         return caps[1].to_string();
     }

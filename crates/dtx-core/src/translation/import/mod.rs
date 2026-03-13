@@ -93,7 +93,7 @@ pub fn export_custom_scripts(
     }
 
     // 4. Export scripts as packages (modifies nix files)
-    let result = match export_scripts_as_packages(flake_dir, &scripts) {
+    let result = match export_scripts_as_packages(&scripts) {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("failed to export scripts as packages: {}", e);
@@ -120,21 +120,19 @@ pub fn export_custom_scripts(
     (result.exported_packages.len(), result.exported_packages)
 }
 
-/// Rewrite a nix store path in a command to just the basename,
-/// if the basename matches the given package name.
+/// Rewrite nix store paths in a command whose basename matches `package_name`.
+/// Preserves original whitespace.
 fn rewrite_store_path_for_package(command: &str, package_name: &str) -> String {
-    command
-        .split_whitespace()
-        .map(|token| {
-            if token.starts_with("/nix/store/") {
-                if let Some(basename) = token.rsplit('/').next() {
-                    if basename == package_name {
-                        return basename;
-                    }
-                }
+    let mut result = command.to_string();
+    for token in command.split_whitespace() {
+        if !token.starts_with("/nix/store/") {
+            continue;
+        }
+        if let Some(basename) = token.rsplit('/').next() {
+            if basename == package_name {
+                result = result.replacen(token, basename, 1);
             }
-            token
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+    }
+    result
 }
