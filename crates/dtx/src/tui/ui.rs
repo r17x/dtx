@@ -30,7 +30,7 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
         ])
         .split(f.area());
 
-    draw_header(f, chunks[0]);
+    draw_header(f, app, chunks[0]);
     draw_main(f, app, service_infos, chunks[1]);
     draw_footer(f, app, chunks[2]);
 
@@ -49,7 +49,12 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
 }
 
 /// Draw the header.
-fn draw_header(f: &mut Frame, area: Rect) {
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let run_count = app.running_count();
+    let done_count = app.completed_count();
+    let err_count = app.failed_count();
+    let tally = format!("{run_count} RUN \u{00b7} {done_count} DON \u{00b7} {err_count} ERR");
+
     let header = Paragraph::new(vec![Line::from(vec![
         Span::styled(
             " dtx ",
@@ -59,8 +64,7 @@ fn draw_header(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("native", Style::default().fg(Color::Cyan)),
-        Span::raw(" process manager"),
+        Span::styled(&tally, Style::default().fg(Color::DarkGray)),
     ])])
     .block(
         Block::default()
@@ -136,10 +140,17 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
                 None => Span::raw(""),
             };
 
+            let is_recent_failure = app
+                .recent_failures
+                .get(&svc.name)
+                .is_some_and(|t| t.elapsed().as_secs() < 3);
+
             let style = if i == app.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
+            } else if is_recent_failure {
+                Style::default().add_modifier(Modifier::BOLD)
             } else if let Some(bg) = health_bg {
                 Style::default().bg(bg)
             } else {
@@ -160,9 +171,19 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
         })
         .collect();
 
+    let err_count = service_infos
+        .iter()
+        .filter(|s| matches!(s.state, DisplayState::Failed { .. }))
+        .count();
+    let title = if err_count > 0 {
+        format!(" Services ({err_count} ERR) ")
+    } else {
+        " Services ".to_string()
+    };
+
     let services = List::new(items).block(
         Block::default()
-            .title(" Services ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan)),
     );

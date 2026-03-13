@@ -133,6 +133,36 @@ impl LogScroll {
     }
 }
 
+/// Filter for which services to display based on state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayStateFilter {
+    #[default]
+    All,
+    Running,
+    Failed,
+    Completed,
+}
+
+impl DisplayStateFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Failed,
+            Self::Failed => Self::Running,
+            Self::Running => Self::Completed,
+            Self::Completed => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Running => "RUN",
+            Self::Failed => "ERR",
+            Self::Completed => "DON",
+        }
+    }
+}
+
 /// TUI interaction mode.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum UiMode {
@@ -213,6 +243,12 @@ pub struct App {
     pub detail: Option<ServiceDetail>,
     /// Track when services started (for uptime).
     started_at: HashMap<String, Instant>,
+    /// Whether startup has settled (all services left Pending/Starting).
+    startup_settled: bool,
+    /// Recent failure timestamps for transient highlight (bold for 3s).
+    pub recent_failures: HashMap<String, Instant>,
+    /// Current service state filter.
+    pub filter_state: DisplayStateFilter,
 }
 
 impl App {
@@ -248,12 +284,19 @@ impl App {
             active_filter: None,
             detail: None,
             started_at: HashMap::new(),
+            startup_settled: false,
+            recent_failures: HashMap::new(),
         }
     }
 
     /// Set port for a service.
     pub fn set_port(&mut self, name: &str, port: u16) {
         self.service_ports.insert(name.to_string(), port);
+    }
+
+    /// Remove expired transient failure entries (older than 3s).
+    pub fn clean_recent_failures(&mut self) {
+        self.recent_failures.retain(|_, t| t.elapsed().as_secs() < 3);
     }
 
     /// Get service info for display.
@@ -315,6 +358,7 @@ impl App {
                 self.service_states
                     .insert(name.clone(), DisplayState::Failed { error: Some(error) });
                 self.started_at.remove(&name);
+                self.recent_failures.insert(name, Instant::now());
             }
             LifecycleEvent::Restarting { id, attempt, .. } => {
                 let name = id.to_string();
@@ -348,6 +392,28 @@ impl App {
             }
             LifecycleEvent::DependencyWaiting { .. }
             | LifecycleEvent::DependencyResolved { .. } => {}
+        }
+
+        // Auto-focus first failed service once startup settles
+        if !self.startup_settled {
+            let all_settled = self.service_states.values().all(|s| {
+                !matches!(s, DisplayState::Pending | DisplayState::Starting)
+            });
+            if all_settled && !self.service_states.is_empty() {
+                self.startup_settled = true;
+                if let Some(idx) = self
+                    .service_names
+                    .iter()
+                    .position(|name| {
+                        matches!(
+                            self.service_states.get(name),
+                            Some(DisplayState::Failed { .. })
+                        )
+                    })
+                {
+                    self.selected = idx;
+                }
+            }
         }
     }
 
@@ -902,6 +968,30 @@ impl App {
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some(msg);
     }
+
+    /// Count services in Running state.
+    pub fn running_count(&self) -> usize {
+        self.service_states
+            .values()
+            .filter(|s| matches!(s, DisplayState::Running { .. }))
+            .count()
+    }
+
+    /// Count services in Completed state.
+    pub fn completed_count(&self) -> usize {
+        self.service_states
+            .values()
+            .filter(|s| matches!(s, DisplayState::Completed { .. }))
+            .count()
+    }
+
+    /// Count services in Failed state.
+    pub fn failed_count(&self) -> usize {
+        self.service_states
+            .values()
+            .filter(|s| matches!(s, DisplayState::Failed { .. }))
+            .count()
+    }
 }
 
 /// Actions that can be triggered from the TUI.
@@ -1103,6 +1193,9 @@ pub async fn run_tui(
         if tick_count % 10 == 0 {
             app.sync_from_orchestrator(&orchestrator).await;
         }
+
+        // Clean up expired transient failure highlights
+        app.clean_recent_failures();
 
         // Get service infos for rendering
         let service_infos = app.service_infos();
