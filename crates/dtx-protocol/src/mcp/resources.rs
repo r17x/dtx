@@ -2,6 +2,7 @@
 //!
 //! Resources expose dtx entities to AI agents.
 
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 
 /// MCP Resource definition.
@@ -117,9 +118,35 @@ pub struct ReadResourceResult {
     pub contents: Vec<ResourceContent>,
 }
 
+/// Percent-encoding set for path segments in dtx URIs.
+const PATH_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+fn encode_path(path: &str) -> String {
+    utf8_percent_encode(path, PATH_ENCODE_SET).to_string()
+}
+
+fn decode_path(encoded: &str) -> String {
+    percent_decode_str(encoded).decode_utf8_lossy().into_owned()
+}
+
 /// dtx resource URI helpers.
 pub mod uris {
-    use super::DxtUri;
+    use super::{decode_path, encode_path, DtxUri};
 
     /// URI prefix for dtx resources.
     pub const PREFIX: &str = "dtx://";
@@ -150,8 +177,33 @@ pub mod uris {
         )
     }
 
+    /// Create memory list URI.
+    pub fn memory_list() -> String {
+        format!("{}memory", PREFIX)
+    }
+
+    /// Create memory item URI.
+    pub fn memory_item(name: &str) -> String {
+        format!("{}memory/{}", PREFIX, name)
+    }
+
+    /// Create code symbols URI for a file.
+    pub fn code_symbols(path: &str) -> String {
+        format!("{}code/{}/symbols", PREFIX, encode_path(path))
+    }
+
+    /// Create code symbol URI for a specific symbol in a file.
+    pub fn code_symbol(path: &str, name_path: &str) -> String {
+        format!(
+            "{}code/{}/symbols/{}",
+            PREFIX,
+            encode_path(path),
+            encode_path(name_path)
+        )
+    }
+
     /// Parse a dtx URI.
-    pub fn parse(uri: &str) -> Option<DxtUri> {
+    pub fn parse(uri: &str) -> Option<DtxUri> {
         if !uri.starts_with(PREFIX) {
             return None;
         }
@@ -160,20 +212,31 @@ pub mod uris {
         let parts: Vec<&str> = path.split('/').collect();
 
         match parts.as_slice() {
-            ["project", project_id] => Some(DxtUri::Project {
+            ["project", project_id] => Some(DtxUri::Project {
                 project_id: (*project_id).to_string(),
             }),
-            ["project", project_id, "resource", resource_id] => Some(DxtUri::Resource {
+            ["project", project_id, "resource", resource_id] => Some(DtxUri::Resource {
                 project_id: (*project_id).to_string(),
                 resource_id: (*resource_id).to_string(),
             }),
-            ["project", project_id, "resource", resource_id, "logs"] => Some(DxtUri::Logs {
+            ["project", project_id, "resource", resource_id, "logs"] => Some(DtxUri::Logs {
                 project_id: (*project_id).to_string(),
                 resource_id: (*resource_id).to_string(),
             }),
-            ["project", project_id, "resource", resource_id, "config"] => Some(DxtUri::Config {
+            ["project", project_id, "resource", resource_id, "config"] => Some(DtxUri::Config {
                 project_id: (*project_id).to_string(),
                 resource_id: (*resource_id).to_string(),
+            }),
+            ["memory"] => Some(DtxUri::MemoryList),
+            ["memory", name] => Some(DtxUri::MemoryItem {
+                name: (*name).to_string(),
+            }),
+            ["code", encoded_path, "symbols"] => Some(DtxUri::CodeSymbols {
+                path: decode_path(encoded_path),
+            }),
+            ["code", encoded_path, "symbols", encoded_name_path] => Some(DtxUri::CodeSymbol {
+                path: decode_path(encoded_path),
+                name_path: decode_path(encoded_name_path),
             }),
             _ => None,
         }
@@ -182,7 +245,7 @@ pub mod uris {
 
 /// Parsed dtx URI.
 #[derive(Clone, Debug, PartialEq)]
-pub enum DxtUri {
+pub enum DtxUri {
     /// Project overview.
     Project { project_id: String },
 
@@ -203,6 +266,18 @@ pub enum DxtUri {
         project_id: String,
         resource_id: String,
     },
+
+    /// Memory list.
+    MemoryList,
+
+    /// Single memory item.
+    MemoryItem { name: String },
+
+    /// Code symbols overview for a file.
+    CodeSymbols { path: String },
+
+    /// Single code symbol in a file.
+    CodeSymbol { path: String, name_path: String },
 }
 
 #[cfg(test)]
@@ -238,7 +313,7 @@ mod tests {
         let uri = uris::parse("dtx://project/myapp");
         assert_eq!(
             uri,
-            Some(DxtUri::Project {
+            Some(DtxUri::Project {
                 project_id: "myapp".to_string()
             })
         );
@@ -246,7 +321,7 @@ mod tests {
         let uri = uris::parse("dtx://project/myapp/resource/postgres");
         assert_eq!(
             uri,
-            Some(DxtUri::Resource {
+            Some(DtxUri::Resource {
                 project_id: "myapp".to_string(),
                 resource_id: "postgres".to_string()
             })
@@ -254,6 +329,51 @@ mod tests {
 
         let uri = uris::parse("https://example.com");
         assert_eq!(uri, None);
+    }
+
+    #[test]
+    fn memory_uri_roundtrip() {
+        let list_uri = uris::memory_list();
+        assert_eq!(uris::parse(&list_uri), Some(DtxUri::MemoryList));
+
+        let item_uri = uris::memory_item("my-notes");
+        assert_eq!(
+            uris::parse(&item_uri),
+            Some(DtxUri::MemoryItem {
+                name: "my-notes".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn code_uri_roundtrip() {
+        let symbols_uri = uris::code_symbols("src/main.rs");
+        assert_eq!(
+            uris::parse(&symbols_uri),
+            Some(DtxUri::CodeSymbols {
+                path: "src/main.rs".to_string()
+            })
+        );
+
+        let symbol_uri = uris::code_symbol("src/main.rs", "MyStruct/new");
+        assert_eq!(
+            uris::parse(&symbol_uri),
+            Some(DtxUri::CodeSymbol {
+                path: "src/main.rs".to_string(),
+                name_path: "MyStruct/new".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn code_uri_with_special_chars() {
+        let uri = uris::code_symbols("path with spaces/file.rs");
+        assert_eq!(
+            uris::parse(&uri),
+            Some(DtxUri::CodeSymbols {
+                path: "path with spaces/file.rs".to_string()
+            })
+        );
     }
 
     #[test]

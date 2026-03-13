@@ -15,7 +15,9 @@ path = "src/main.rs"
 dtx-core = { workspace = true }
 dtx-process = { workspace = true }
 dtx-web = { workspace = true }
-dtx-protocol = { workspace = true }
+dtx-protocol = { workspace = true, features = ["code", "memory"] }
+dtx-code = { workspace = true }
+dtx-memory = { workspace = true }
 indexmap = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }

@@ -1,9 +1,12 @@
 //! MCP server command for AI agent integration.
 
-use anyhow::Result;
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
+
+use anyhow::Result;
 use tracing::{debug, info};
 
+use dtx_core::config::project::find_project_root_cwd;
 use dtx_protocol::mcp::{DefaultMcpHandler, McpHandler};
 use dtx_protocol::{ErrorObject, Request, Response};
 
@@ -27,14 +30,32 @@ impl McpArgs {
 pub async fn run(args: McpArgs) -> Result<()> {
     info!("Starting dtx MCP server");
 
-    // Create a mock protocol handler for now
-    // In a full implementation, this would connect to the orchestrator
-    let handler = MockProtocolHandler::new();
-    let mcp_handler = DefaultMcpHandler::new(handler);
+    // Discover project root
+    let project_root = args
+        .project
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(find_project_root_cwd)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
 
-    if let Some(project) = &args.project {
-        info!(project = %project, "Using project directory");
-    }
+    info!(root = %project_root.display(), "Using project root");
+
+    // Create real backends
+    let code_index = Arc::new(dtx_code::WorkspaceIndex::new(project_root.clone()));
+    let memory_store = Arc::new(
+        dtx_memory::MemoryStore::new(project_root.join(".dtx").join("memories")).unwrap_or_else(
+            |e| {
+                tracing::warn!("Failed to init memory store: {e}, using fallback");
+                dtx_memory::MemoryStore::new(std::env::temp_dir().join("dtx-memories"))
+                    .expect("fallback memory store")
+            },
+        ),
+    );
+
+    let handler = MockProtocolHandler::new();
+    let mcp_handler = DefaultMcpHandler::new(handler)
+        .with_code(code_index)
+        .with_memory(memory_store);
 
     // Read JSON-RPC requests from stdin and write responses to stdout
     let stdin = io::stdin();

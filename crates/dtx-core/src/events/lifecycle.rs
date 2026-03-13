@@ -112,6 +112,14 @@ pub enum LifecycleEvent {
         project_id: String,
         timestamp: DateTime<Utc>,
     },
+
+    // === Memory ===
+    /// A code memory has changed.
+    MemoryChanged {
+        project_id: String,
+        memory_name: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// Condition for dependency readiness.
@@ -143,7 +151,7 @@ impl LifecycleEvent {
             | Self::Log { id, .. }
             | Self::DependencyWaiting { id, .. }
             | Self::DependencyResolved { id, .. } => Some(id),
-            Self::ConfigChanged { .. } => None,
+            Self::ConfigChanged { .. } | Self::MemoryChanged { .. } => None,
         }
     }
 
@@ -161,7 +169,8 @@ impl LifecycleEvent {
             | Self::Log { timestamp, .. }
             | Self::DependencyWaiting { timestamp, .. }
             | Self::DependencyResolved { timestamp, .. }
-            | Self::ConfigChanged { timestamp, .. } => *timestamp,
+            | Self::ConfigChanged { timestamp, .. }
+            | Self::MemoryChanged { timestamp, .. } => *timestamp,
         }
     }
 
@@ -180,6 +189,7 @@ impl LifecycleEvent {
             Self::DependencyWaiting { .. } => "dependency_waiting",
             Self::DependencyResolved { .. } => "dependency_resolved",
             Self::ConfigChanged { .. } => "config_changed",
+            Self::MemoryChanged { .. } => "memory_changed",
         }
     }
 
@@ -330,6 +340,23 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event"], "failed");
         assert_eq!(json["error"], "connection refused");
+    }
+
+    #[test]
+    fn lifecycle_event_memory_changed_serde() {
+        let event = LifecycleEvent::MemoryChanged {
+            project_id: "proj".to_string(),
+            memory_name: "test-mem".to_string(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["event"], "memory_changed");
+        assert_eq!(json["memory_name"], "test-mem");
+        assert_eq!(event.resource_id(), None);
+        assert_eq!(event.event_type(), "memory_changed");
+
+        let parsed: LifecycleEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.event_type(), "memory_changed");
     }
 
     #[test]

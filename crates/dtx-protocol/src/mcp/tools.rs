@@ -113,8 +113,8 @@ pub enum ToolContent {
     Resource { resource: Resource },
 }
 
-/// Get all dtx tools.
-pub fn dtx_tools() -> Vec<Tool> {
+/// Get resource management tools (original 8).
+pub fn dtx_resource_tools() -> Vec<Tool> {
     vec![
         Tool::new(
             "start_resource",
@@ -216,6 +216,286 @@ pub fn dtx_tools() -> Vec<Tool> {
         )
         .with_description("Stop all resources"),
     ]
+}
+
+/// Get code intelligence tools (7).
+#[cfg(feature = "code")]
+pub fn dtx_code_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "get_symbols_overview",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to get symbols from"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Max depth of symbol tree (default: unlimited)"
+                    }
+                },
+                "required": ["path"]
+            }),
+        )
+        .with_description("Get symbol overview for a file"),
+        Tool::new(
+            "find_symbol",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name_path_pattern": {
+                        "type": "string",
+                        "description": "Symbol name path pattern (substring match, e.g. 'MyStruct/my_method')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Restrict search to this file or directory"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Max depth of children to include"
+                    },
+                    "include_body": {
+                        "type": "boolean",
+                        "description": "Include source text of matched symbols",
+                        "default": false
+                    }
+                },
+                "required": ["name_path_pattern"]
+            }),
+        )
+        .with_description("Find symbols by name path pattern"),
+        Tool::new(
+            "find_references",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Symbol name to find references for"
+                    },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Restrict search to this directory"
+                    }
+                },
+                "required": ["symbol_name"]
+            }),
+        )
+        .with_description("Find all references to a symbol"),
+        Tool::new(
+            "search_pattern",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for"
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "File glob filter (e.g. '*.rs')"
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Lines of context around matches (default: 2)",
+                        "default": 2
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        )
+        .with_description("Search for a regex pattern across files"),
+        Tool::new(
+            "replace_symbol_body",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path containing the symbol"
+                    },
+                    "name_path": {
+                        "type": "string",
+                        "description": "Symbol name path (e.g. 'MyStruct/my_method')"
+                    },
+                    "new_body": {
+                        "type": "string",
+                        "description": "New source code to replace the symbol body"
+                    }
+                },
+                "required": ["path", "name_path", "new_body"]
+            }),
+        )
+        .with_description("Replace a symbol's body with new source code"),
+        Tool::new(
+            "insert_before_symbol",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path containing the symbol"
+                    },
+                    "name_path": {
+                        "type": "string",
+                        "description": "Symbol name path to insert before"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Source code to insert before the symbol"
+                    }
+                },
+                "required": ["path", "name_path", "content"]
+            }),
+        )
+        .with_description("Insert code before a symbol"),
+        Tool::new(
+            "insert_after_symbol",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path containing the symbol"
+                    },
+                    "name_path": {
+                        "type": "string",
+                        "description": "Symbol name path to insert after"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Source code to insert after the symbol"
+                    }
+                },
+                "required": ["path", "name_path", "content"]
+            }),
+        )
+        .with_description("Insert code after a symbol"),
+    ]
+}
+
+/// Get memory management tools (5).
+#[cfg(feature = "memory")]
+pub fn dtx_memory_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "list_memories",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "Filter by kind: user, project, feedback, reference"
+                    }
+                }
+            }),
+        )
+        .with_description("List all memories"),
+        Tool::new(
+            "read_memory",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Memory name (kebab-case)"
+                    }
+                },
+                "required": ["name"]
+            }),
+        )
+        .with_description("Read a memory by name"),
+        Tool::new(
+            "write_memory",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Memory name (kebab-case)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Memory content text"
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Memory kind: user, project, feedback, reference",
+                        "default": "project"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One-line description of the memory"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Tags for categorization"
+                    }
+                },
+                "required": ["name", "content"]
+            }),
+        )
+        .with_description("Create or update a memory"),
+        Tool::new(
+            "edit_memory",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Memory name to edit"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content (if provided, replaces existing)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New description"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "New tags (replaces existing)"
+                    }
+                },
+                "required": ["name"]
+            }),
+        )
+        .with_description("Edit an existing memory's metadata or content"),
+        Tool::new(
+            "delete_memory",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Memory name to delete"
+                    }
+                },
+                "required": ["name"]
+            }),
+        )
+        .with_description("Delete a memory"),
+    ]
+}
+
+/// Get all dtx tools (resource + code + memory).
+#[allow(unused_mut)]
+pub fn dtx_tools() -> Vec<Tool> {
+    let mut tools = dtx_resource_tools();
+
+    #[cfg(feature = "code")]
+    tools.extend(dtx_code_tools());
+
+    #[cfg(feature = "memory")]
+    tools.extend(dtx_memory_tools());
+
+    tools
 }
 
 #[cfg(test)]

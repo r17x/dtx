@@ -421,7 +421,8 @@ impl App {
                     .insert(id.to_string(), DisplayHealth::Unhealthy { reason });
             }
             LifecycleEvent::DependencyWaiting { .. }
-            | LifecycleEvent::DependencyResolved { .. } => {}
+            | LifecycleEvent::DependencyResolved { .. }
+            | LifecycleEvent::MemoryChanged { .. } => {}
         }
 
         // Auto-focus first failed service once startup settles

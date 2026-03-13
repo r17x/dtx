@@ -32,6 +32,6 @@ pub use filter::EventFilter;
 pub use lifecycle::{DependencyCondition, LifecycleEvent};
 pub use resource_bus::{ResourceEventBus, ResourceEventSubscriber};
 pub use socket::{
-    event_socket_path, notify_config_changed, notify_config_changed_sync, read_web_port,
-    start_event_listener, PortGuard, SocketGuard,
+    event_socket_path, notify_config_changed, notify_config_changed_sync, notify_memory_changed,
+    notify_memory_changed_sync, read_web_port, start_event_listener, PortGuard, SocketGuard,
 };

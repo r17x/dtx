@@ -33,6 +33,16 @@ tokio-tungstenite = { version = "0.24", optional = true }
 # Axum integration (optional)
 axum = { workspace = true, optional = true }
 
+# Utilities
+chrono = { workspace = true }
+percent-encoding = { workspace = true }
+
+# Code intelligence (optional)
+dtx-code = { workspace = true, optional = true }
+
+# Memory store (optional)
+dtx-memory = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
@@ -41,6 +51,8 @@ default = ["http", "websocket"]
 http = ["dep:reqwest"]
 websocket = ["dep:tokio-tungstenite"]
 axum = ["dep:axum"]
+code = ["dep:dtx-code"]
+memory = ["dep:dtx-memory"]
 
 [lints]
 workspace = true
