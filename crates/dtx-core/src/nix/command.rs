@@ -212,7 +212,6 @@ pub fn is_local_binary(command: &str) -> bool {
 
     // Check the original command for path indicators
     let cmd_trimmed = command.trim();
-    let _first_word = cmd_trimmed.split_whitespace().next().unwrap_or("");
 
     // Skip env vars to get actual command
     let actual_cmd = cmd_trimmed
@@ -401,21 +400,20 @@ pub fn is_nix_store_path(path: &str) -> bool {
 /// Returns `(sanitized_command, warnings)`.
 pub fn sanitize_nix_store_paths(command: &str, path_env: &str) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    let mut result_tokens: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut result_tokens: Vec<&str> = Vec::new();
 
     let path_dirs: Vec<&str> = path_env.split(':').collect();
 
-    for token in &tokens {
+    for token in command.split_whitespace() {
         if !is_nix_store_path(token) {
-            result_tokens.push((*token).to_string());
+            result_tokens.push(token);
             continue;
         }
 
         let basename = match token.rsplit('/').next() {
             Some(name) if !name.is_empty() => name,
             _ => {
-                result_tokens.push((*token).to_string());
+                result_tokens.push(token);
                 continue;
             }
         };
@@ -429,12 +427,12 @@ pub fn sanitize_nix_store_paths(command: &str, path_env: &str) -> (String, Vec<S
         });
 
         if found_on_path {
-            result_tokens.push(basename.to_string());
+            result_tokens.push(basename);
         } else {
             warnings.push(format!(
                 "nix store path not found on PATH, keeping as-is: {token}"
             ));
-            result_tokens.push((*token).to_string());
+            result_tokens.push(token);
         }
     }
 
@@ -666,10 +664,8 @@ mod tests {
         }
 
         let path_env = dir.path().to_str().unwrap();
-        let (result, warnings) = sanitize_nix_store_paths(
-            "/nix/store/abc123-nodejs-20/bin/node",
-            path_env,
-        );
+        let (result, warnings) =
+            sanitize_nix_store_paths("/nix/store/abc123-nodejs-20/bin/node", path_env);
         assert_eq!(result, "node");
         assert!(warnings.is_empty());
     }

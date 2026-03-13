@@ -478,16 +478,19 @@ async fn run(out: &output::Output) -> Result<()> {
             format,
             no_nix,
             dry_run,
-        } => cmd::import::run(
-            &mut ctx,
-            out,
-            cmd::import::ImportArgs {
-                file,
-                format,
-                no_nix,
-                dry_run,
-            },
-        ).await,
+        } => {
+            cmd::import::run(
+                &mut ctx,
+                out,
+                cmd::import::ImportArgs {
+                    file,
+                    format,
+                    no_nix,
+                    dry_run,
+                },
+            )
+            .await
+        }
 
         Commands::Add(args) => cmd::add::run(
             &mut ctx,

@@ -332,8 +332,10 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         if let Some(path) = get_devshell_path(ctx.store.project_root()).await {
             let count = dtx_core::translation::import::sanitize_nix_commands(&mut config, &path);
             if count > 0 {
-                out.step("nix")
-                    .done_untimed(&format!("sanitized nix store paths in {} command(s)", count));
+                out.step("nix").done_untimed(&format!(
+                    "sanitized nix store paths in {} command(s)",
+                    count
+                ));
             }
         }
     }
@@ -419,7 +421,10 @@ async fn get_devshell_path(project_root: &std::path::Path) -> Option<String> {
     match DevEnvironment::from_flake_auto(project_root).await {
         Ok(env) => env.path().map(|p| p.to_string()),
         Err(e) => {
-            tracing::debug!("devShell eval failed, skipping nix path sanitization: {}", e);
+            tracing::debug!(
+                "devShell eval failed, skipping nix path sanitization: {}",
+                e
+            );
             None
         }
     }
