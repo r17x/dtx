@@ -130,12 +130,15 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
             };
 
             let state_label = match &svc.state {
-                DisplayState::Running { .. } => "RUN",
-                DisplayState::Starting => "STR",
-                DisplayState::Pending => "PND",
-                DisplayState::Stopped => "STP",
-                DisplayState::Completed { .. } => "DON",
-                DisplayState::Failed { .. } => "ERR",
+                DisplayState::Running { .. } => "RUN".to_string(),
+                DisplayState::Starting => "STR".to_string(),
+                DisplayState::Pending => "PND".to_string(),
+                DisplayState::Stopped => "STP".to_string(),
+                DisplayState::Completed { .. } => "DON".to_string(),
+                DisplayState::Failed { error } => match error {
+                    Some(e) => format!("ERR: {e}"),
+                    None => "ERR".to_string(),
+                },
             };
 
             let restart_info = if svc.restarts > 0 {
