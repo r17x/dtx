@@ -389,6 +389,20 @@ impl ProcessResource {
         for (key, value) in &self.config.environment {
             cmd.env(key, value);
         }
+
+        // Isolate the child into its own process group so signals
+        // (SIGTERM, SIGKILL) reach the entire tree of descendants.
+        #[cfg(unix)]
+        {
+            // SAFETY: setpgid is async-signal-safe per POSIX
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = cmd.spawn().map_err(|e| {
             Box::new(std::io::Error::other(format!(
                 "Failed to spawn process: {}",
@@ -430,7 +444,7 @@ impl ProcessResource {
             if let Some(pid) = child.id() {
                 let sig = signal.as_libc();
                 unsafe {
-                    if libc::kill(pid as i32, sig) != 0 {
+                    if libc::kill(-(pid as i32), sig) != 0 {
                         return Err(Box::new(std::io::Error::last_os_error()));
                     }
                 }
@@ -591,10 +605,22 @@ impl Resource for ProcessResource {
                     error!(id = %self.config.id, error = %e, "Error waiting for process");
                 }
                 Err(_) => {
-                    // Timeout - force kill
-                    warn!(id = %self.config.id, "Graceful shutdown timed out, killing process");
-                    if let Err(e) = child.kill().await {
-                        error!(id = %self.config.id, error = %e, "Failed to kill process");
+                    // Timeout - force kill the entire process group
+                    warn!(id = %self.config.id, "Graceful shutdown timed out, killing process group");
+                    #[cfg(unix)]
+                    {
+                        if let Some(pid) = child.id() {
+                            unsafe {
+                                libc::kill(-(pid as i32), libc::SIGKILL);
+                            }
+                        }
+                        let _ = child.wait().await;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        if let Err(e) = child.kill().await {
+                            error!(id = %self.config.id, error = %e, "Failed to kill process");
+                        }
                     }
                     self.state = ResourceState::Stopped {
                         exit_code: None,
@@ -619,6 +645,21 @@ impl Resource for ProcessResource {
 
     async fn kill(&mut self, _ctx: &Context) -> ResourceResult<()> {
         if let Some(ref mut child) = self.child {
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.id() {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
+                child.wait().await.map_err(|e| {
+                    Box::new(std::io::Error::other(format!(
+                        "Failed to reap process: {}",
+                        e
+                    ))) as ResourceError
+                })?;
+            }
+            #[cfg(not(unix))]
             child.kill().await.map_err(|e| {
                 Box::new(std::io::Error::other(format!(
                     "Failed to kill process: {}",
