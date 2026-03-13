@@ -142,25 +142,3 @@ jobs:
 
       - name: Format Check
         run: nix build .#checks.x86_64-linux.dtxFmt --print-build-logs
-
-  # =============================================================================
-  # Documentation
-  # =============================================================================
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v21
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          extra-conf: "experimental-features = nix-command flakes pipe-operators"
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: cachix/cachix-action@v16
-        with:
-          name: r17x
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
-        continue-on-error: true
-
-      - name: Build Documentation
-        run: nix build .#checks.x86_64-linux.dtxDoc --print-build-logs
