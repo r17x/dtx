@@ -461,13 +461,19 @@ impl App {
                         .filter(|n| **n != name)
                         .cloned()
                         .collect();
-                    let port = self.service_ports.get(&name).copied();
+                    // Load current values from ConfigStore, fall back to local state
+                    let fallback_port = self.service_ports.get(&name).copied();
+                    let (command, port, deps) = ConfigStore::discover_and_load()
+                        .ok()
+                        .and_then(|store| store.get_resource(&name).map(|rc| {
+                            let cmd = rc.command.clone().unwrap_or_default();
+                            let d: Vec<String> =
+                                rc.depends_on.iter().map(|d| d.name().to_string()).collect();
+                            (cmd, rc.port, d)
+                        }))
+                        .unwrap_or_else(|| (String::new(), fallback_port, Vec::new()));
                     self.mode = UiMode::Wizard(Box::new(super::wizard::WizardState::new_edit(
-                        &name,
-                        "",
-                        port,
-                        Vec::new(),
-                        available,
+                        &name, &command, port, deps, available,
                     )));
                 }
                 None

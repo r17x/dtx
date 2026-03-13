@@ -128,10 +128,7 @@ impl LogStore {
         start_line: usize,
         count: usize,
     ) -> io::Result<Vec<DisplayLog>> {
-        // Flush to ensure all data is on disk before reading
-        if let Some(file) = self.files.get_mut(service) {
-            let _ = file.writer.flush();
-        }
+        self.flush_service(service);
         let file = match self.files.get(service) {
             Some(f) => f,
             None => return Ok(Vec::new()),
@@ -143,23 +140,90 @@ impl LogStore {
             .skip(start_line)
             .take(count)
             .filter_map(|line| line.ok())
-            .map(|line| {
-                let (is_stderr, content) = if let Some(rest) = line.strip_prefix("[ERR] ") {
-                    (true, rest.to_string())
-                } else if let Some(rest) = line.strip_prefix("[OUT] ") {
-                    (false, rest.to_string())
-                } else {
-                    (false, line)
-                };
-                DisplayLog {
-                    service: service.to_string(),
-                    content,
-                    is_stderr,
-                }
-            })
+            .map(|line| parse_log_line(service, line))
             .collect();
 
         Ok(logs)
+    }
+
+    /// Read the last `count` lines from a log file by seeking from the end.
+    #[allow(dead_code)]
+    pub fn load_tail(
+        &mut self,
+        service: &str,
+        count: usize,
+    ) -> io::Result<Vec<DisplayLog>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        self.flush_service(service);
+        let path = match self.files.get(service) {
+            Some(f) => &f.path,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        if file_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Read backwards in chunks, collecting them in reverse order
+        let chunk_size: u64 = 8192;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut pos = file_len;
+        let mut newline_count = 0;
+
+        loop {
+            let read_start = pos.saturating_sub(chunk_size);
+            let read_len = (pos - read_start) as usize;
+            if read_len == 0 {
+                break;
+            }
+
+            file.seek(SeekFrom::Start(read_start))?;
+            let mut chunk = vec![0u8; read_len];
+            file.read_exact(&mut chunk)?;
+
+            for &b in chunk.iter().rev() {
+                if b == b'\n' {
+                    newline_count += 1;
+                    if newline_count > count {
+                        break;
+                    }
+                }
+            }
+
+            chunks.push(chunk);
+            pos = read_start;
+
+            if newline_count > count || pos == 0 {
+                break;
+            }
+        }
+
+        // Assemble chunks in correct order (they were collected newest-first)
+        chunks.reverse();
+        let buf: Vec<u8> = chunks.into_iter().flatten().collect();
+
+        // BufRead::lines handles UTF-8 per-line, avoiding mid-character splits
+        let cursor = io::Cursor::new(buf);
+        let all_lines: Vec<String> = BufRead::lines(BufReader::new(cursor))
+            .filter_map(|l| l.ok())
+            .collect();
+        let start = all_lines.len().saturating_sub(count);
+        let logs = all_lines[start..]
+            .iter()
+            .map(|line| parse_log_line(service, line.clone()))
+            .collect();
+
+        Ok(logs)
+    }
+
+    /// Flush a service's log writer to disk before reading.
+    fn flush_service(&mut self, service: &str) {
+        if let Some(file) = self.files.get_mut(service) {
+            let _ = file.writer.flush();
+        }
     }
 
     /// Total number of log lines for a service (or all).
@@ -245,6 +309,21 @@ impl LogStore {
                 }
             }
         }
+    }
+}
+
+fn parse_log_line(service: &str, line: String) -> DisplayLog {
+    let (is_stderr, content) = if let Some(rest) = line.strip_prefix("[ERR] ") {
+        (true, rest.to_string())
+    } else if let Some(rest) = line.strip_prefix("[OUT] ") {
+        (false, rest.to_string())
+    } else {
+        (false, line)
+    };
+    DisplayLog {
+        service: service.to_string(),
+        content,
+        is_stderr,
     }
 }
 
@@ -391,5 +470,41 @@ mod tests {
         assert!(!loaded[0].is_stderr);
         assert_eq!(loaded[1].content, "error msg");
         assert!(loaded[1].is_stderr);
+    }
+
+    #[test]
+    fn test_tail_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = LogStore::new(dir.path().to_path_buf(), 100);
+
+        for i in 0..50 {
+            store.append(DisplayLog {
+                service: "api".to_string(),
+                content: format!("line {}", i),
+                is_stderr: false,
+            });
+        }
+
+        // Tail: read last 5 lines
+        let tail = store.load_tail("api", 5).unwrap();
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[0].content, "line 45");
+        assert_eq!(tail[4].content, "line 49");
+    }
+
+    #[test]
+    fn test_tail_fewer_lines_than_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = LogStore::new(dir.path().to_path_buf(), 100);
+
+        store.append(DisplayLog {
+            service: "api".to_string(),
+            content: "only line".to_string(),
+            is_stderr: false,
+        });
+
+        let tail = store.load_tail("api", 100).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].content, "only line");
     }
 }
