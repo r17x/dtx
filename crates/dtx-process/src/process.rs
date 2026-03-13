@@ -376,6 +376,12 @@ impl ProcessResource {
                             started_at: Some(started_at),
                             failed_at: Utc::now(),
                         };
+                        self.event_bus.publish(LifecycleEvent::Log {
+                            id: self.config.id.clone(),
+                            stream: LogStreamKind::Stderr,
+                            line: format!("process exited: {error}"),
+                            timestamp: Utc::now(),
+                        });
                         self.event_bus.publish(LifecycleEvent::Failed {
                             id: self.config.id.clone(),
                             kind: ResourceKind::Process,
@@ -564,6 +570,12 @@ impl Resource for ProcessResource {
                 started_at: None,
                 failed_at: Utc::now(),
             };
+            self.event_bus.publish(LifecycleEvent::Log {
+                id: self.config.id.clone(),
+                stream: LogStreamKind::Stderr,
+                line: format!("failed to spawn: {e}"),
+                timestamp: Utc::now(),
+            });
             self.event_bus.publish(LifecycleEvent::Failed {
                 id: self.config.id.clone(),
                 kind: ResourceKind::Process,
