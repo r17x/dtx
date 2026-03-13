@@ -12,6 +12,7 @@ use dtx_core::translation::import::{
 };
 use dtx_core::{sync_add_package, Environment, Port, ServiceName, ShellCommand};
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -251,6 +252,42 @@ fn resource_config_from_imported(
     })
 }
 
+/// Normalize all service names and dependency references in an imported config.
+/// Shows rename warnings for any names that changed.
+fn normalize_imported_config(config: &mut ImportedConfig, out: &Output) {
+    // Build old→new name mapping
+    let renames: HashMap<String, String> = config
+        .resources
+        .iter()
+        .filter_map(|r| {
+            let normalized = ServiceName::normalize(&r.name);
+            if normalized != r.name {
+                Some((r.name.clone(), normalized))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Show rename warnings
+    for (old, new) in &renames {
+        out.step("rename")
+            .done_untimed(&format!("'{}' → '{}' (normalized)", old, new));
+    }
+
+    // Apply normalization to resource names and depends_on references
+    for resource in &mut config.resources {
+        if let Some(new_name) = renames.get(&resource.name) {
+            resource.name = new_name.clone();
+        }
+        for dep in &mut resource.depends_on {
+            if let Some(new_name) = renames.get(dep.as_str()) {
+                *dep = new_name.clone();
+            }
+        }
+    }
+}
+
 /// Run the import command.
 pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     let ImportArgs {
@@ -284,11 +321,14 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
         .done_untimed(&format!("{:?} (from {})", resolved_format, file.display()));
 
     let importer = get_importer(resolved_format);
-    let config = importer.import(&content)?;
+    let mut config = importer.import(&content)?;
 
-    display_import_summary(out, &config);
+    // Normalize all names in-place (underscores→hyphens, uppercase→lowercase)
+    // so display, store ops, and dependency references all use canonical form.
+    normalize_imported_config(&mut config, out);
 
     if dry_run {
+        display_import_summary(out, &config);
         out.step("import").done_untimed("dry run, no changes");
         return Ok(());
     }
@@ -325,16 +365,10 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
                     let project_name = ctx.store.project_name();
                     match sync_add_package(project_root, project_name, pkg) {
                         Ok(true) => format!("added (flake.nix updated with '{}')", pkg),
-                        Ok(false) => {
-                            if let Some(ref p) = nix_package {
-                                format!("added (package: {})", p)
-                            } else {
-                                "added".to_string()
-                            }
-                        }
+                        Ok(false) => format!("added (package: {})", pkg),
                         Err(e) => {
-                            tracing::warn!("Failed to sync flake.nix: {}", e);
-                            "added".to_string()
+                            tracing::debug!("Failed to sync flake.nix: {}", e);
+                            format!("added (package: {}, flake sync skipped)", pkg)
                         }
                     }
                 } else {

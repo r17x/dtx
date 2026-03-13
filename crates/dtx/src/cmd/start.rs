@@ -198,17 +198,18 @@ async fn run_with_native_backend(
     } else {
         pipe.done_untimed(3, &format!("{} ready", services.len()));
         pipe.finish();
-        for w in &deferred_warnings {
-            out.warning(w);
-        }
-        crate::tui::run_tui(
+        let result = crate::tui::run_tui(
             out,
             services.to_vec(),
             project_root,
             Some(flake_dir),
             nix_env,
         )
-        .await
+        .await;
+        for w in &deferred_warnings {
+            out.warning(w);
+        }
+        result
     }
 }
 

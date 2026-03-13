@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -127,6 +127,32 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
     f.render_widget(services, area);
 }
 
+/// Check if a log line looks like an error based on content.
+/// Uses byte-level case-insensitive matching to avoid allocating on the render hot path.
+fn is_error_line(content: &str) -> bool {
+    fn starts_with_ci(s: &str, pat: &str) -> bool {
+        s.as_bytes()
+            .get(..pat.len())
+            .is_some_and(|b| b.eq_ignore_ascii_case(pat.as_bytes()))
+    }
+    fn contains_ci(s: &str, pat: &str) -> bool {
+        s.as_bytes()
+            .windows(pat.len())
+            .any(|w| w.eq_ignore_ascii_case(pat.as_bytes()))
+    }
+    starts_with_ci(content, "error")
+        || starts_with_ci(content, "fatal")
+        || starts_with_ci(content, "panic")
+        || contains_ci(content, "\"level\":\"error\"")
+        || contains_ci(content, "\"level\":\"fatal\"")
+        || contains_ci(content, "[error]")
+        || contains_ci(content, "[fatal]")
+        || contains_ci(content, " error:")
+        || contains_ci(content, " fatal:")
+        || contains_ci(content, "level=error")
+        || contains_ci(content, "level=fatal")
+}
+
 /// Draw the log panel (filtered by selected service).
 fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rect) {
     // Calculate how many lines we can show
@@ -148,7 +174,7 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
         .into_iter()
         .skip(skip_count)
         .map(|log| {
-            let content_style = if log.is_stderr {
+            let content_style = if is_error_line(&log.content) {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default()
@@ -164,14 +190,12 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
         None => " Logs ".to_string(),
     };
 
-    let logs = Paragraph::new(visible_logs)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .wrap(Wrap { trim: false });
+    let logs = Paragraph::new(visible_logs).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
 
     f.render_widget(logs, area);
 }

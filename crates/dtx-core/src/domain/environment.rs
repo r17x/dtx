@@ -63,7 +63,8 @@ impl EnvVar {
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<Self, ParseEnvironmentError> {
-        let key = key.into();
+        let mut key = key.into();
+        key.make_ascii_uppercase();
         let value = value.into();
 
         Self::validate_key(&key)?;
@@ -137,25 +138,27 @@ impl Environment {
         }
     }
 
-    /// Add a variable (builder pattern).
+    /// Add a variable (builder pattern). Key is normalized to uppercase.
     pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.vars.insert(key.into(), value.into());
+        self.vars
+            .insert(key.into().to_ascii_uppercase(), value.into());
         self
     }
 
-    /// Get a variable by key.
+    /// Get a variable by key (case-insensitive lookup).
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.vars.get(key).map(|s| s.as_str())
+        self.vars.get(&key.to_ascii_uppercase()).map(|s| s.as_str())
     }
 
-    /// Set a variable.
+    /// Set a variable. Key is normalized to uppercase.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.vars.insert(key.into(), value.into());
+        self.vars
+            .insert(key.into().to_ascii_uppercase(), value.into());
     }
 
-    /// Remove a variable.
+    /// Remove a variable (case-insensitive lookup).
     pub fn remove(&mut self, key: &str) -> Option<String> {
-        self.vars.remove(key)
+        self.vars.remove(&key.to_ascii_uppercase())
     }
 
     /// Check if empty.
@@ -237,11 +240,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_lowercase_key() {
-        assert!(matches!(
-            "node_env=production".parse::<EnvVar>(),
-            Err(ParseEnvironmentError::InvalidKey(_))
-        ));
+    fn normalize_lowercase_key_from_str() {
+        let var: EnvVar = "node_env=production".parse().unwrap();
+        assert_eq!(var.key(), "NODE_ENV");
+        assert_eq!(var.value(), "production");
+    }
+
+    #[test]
+    fn normalize_lowercase_key_to_uppercase() {
+        let env = EnvVar::new("node_env", "production").unwrap();
+        assert_eq!(env.key(), "NODE_ENV");
     }
 
     #[test]

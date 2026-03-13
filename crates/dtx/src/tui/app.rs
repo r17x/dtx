@@ -10,12 +10,15 @@
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    execute, queue,
+    terminal::{
+        disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+        EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use dtx_core::events::{EventFilter, LifecycleEvent, ResourceEventBus, ResourceEventSubscriber};
 use dtx_core::model::Service;
-use dtx_core::resource::{Context, LogStreamKind, Resource, ResourceId, ResourceState};
+use dtx_core::resource::{Context, Resource, ResourceId, ResourceState};
 use dtx_core::store::ConfigStore;
 use dtx_process::{ProcessResourceConfig, ResourceOrchestrator};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -32,7 +35,6 @@ use super::ui;
 pub struct DisplayLog {
     pub service: String,
     pub content: String,
-    pub is_stderr: bool,
 }
 
 /// Service info for display (derived from events).
@@ -186,13 +188,10 @@ impl App {
                 self.restart_counts.insert(name.clone(), attempt);
                 self.service_states.insert(name, DisplayState::Starting);
             }
-            LifecycleEvent::Log {
-                id, stream, line, ..
-            } => {
+            LifecycleEvent::Log { id, line, .. } => {
                 self.logs.push_back(DisplayLog {
                     service: id.to_string(),
                     content: line,
-                    is_stderr: matches!(stream, LogStreamKind::Stderr),
                 });
 
                 while self.logs.len() > self.max_logs {
@@ -448,133 +447,129 @@ pub async fn run_tui(
         // Get service infos for rendering
         let service_infos = app.service_infos();
 
-        // Draw UI
+        // Draw UI with synchronized output to prevent tearing
+        queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
         terminal.draw(|f| ui::draw_with_infos(f, &app, &service_infos))?;
+        execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
 
-        // Handle events
+        // Handle events — drain all queued keys to avoid stale intermediate redraws
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+        let mut pending_actions: Vec<TuiAction> = Vec::new();
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if let Some(action) = app.handle_key(key.code) {
-                        match action {
-                            TuiAction::Restart(name) => {
-                                let id = ResourceId::new(&name);
-                                if let Some(resource) = orchestrator.get_resource(&id) {
-                                    let mut resource = resource.write().await;
-                                    let ctx = Context::new();
-                                    match resource.stop(&ctx).await {
-                                        Ok(()) => {
-                                            if let Err(e) = resource.start(&ctx).await {
-                                                app.set_status(format!("Failed to restart: {}", e));
-                                            } else {
-                                                app.set_status(format!("Restarted {}", name));
-                                            }
-                                        }
-                                        Err(e) => app.set_status(format!("Failed: {}", e)),
-                                    }
-                                } else {
-                                    app.set_status(format!("Resource {} not found", name));
-                                }
-                            }
-                            TuiAction::Stop(name) => {
-                                let id = ResourceId::new(&name);
-                                if let Some(resource) = orchestrator.get_resource(&id) {
-                                    let mut resource = resource.write().await;
-                                    let ctx = Context::new();
-                                    match resource.stop(&ctx).await {
-                                        Ok(()) => app.set_status(format!("Stopped {}", name)),
-                                        Err(e) => app.set_status(format!("Failed: {}", e)),
-                                    }
-                                } else {
-                                    app.set_status(format!("Resource {} not found", name));
-                                }
-                            }
-                            TuiAction::Reload => {
-                                // Reload config and start any new services
-                                match ConfigStore::discover_and_load() {
-                                    Ok(store) => {
-                                        let mut added = Vec::new();
-                                        let mut removed = Vec::new();
-
-                                        // Find new services
-                                        let current_names: std::collections::HashSet<_> = app
-                                            .service_infos()
-                                            .iter()
-                                            .map(|s| s.name.clone())
-                                            .collect();
-                                        let config_names: std::collections::HashSet<_> = store
-                                            .list_enabled_resources()
-                                            .map(|(n, _)| n.to_string())
-                                            .collect();
-
-                                        for (name, rc) in store.list_enabled_resources() {
-                                            if !current_names.contains(name) {
-                                                let svc = Service::from_resource_config(name, rc);
-                                                let mut config =
-                                                    service_to_config(&svc, &project_dir);
-                                                if let Some(ref env) = nix_env {
-                                                    let user_env =
-                                                        std::mem::take(&mut config.environment);
-                                                    config.environment = env.clone();
-                                                    config.environment.extend(user_env);
-                                                }
-                                                orchestrator.add_resource(config);
-                                                app.add_service(name.to_string());
-                                                added.push(name.to_string());
-                                            }
-                                        }
-
-                                        // Find removed services (don't stop running ones, just remove from display)
-                                        for name in &current_names {
-                                            if !config_names.contains(name.as_str()) {
-                                                app.remove_service(name);
-                                                removed.push(name.clone());
-                                            }
-                                        }
-
-                                        // Start newly added services
-                                        for name in &added {
-                                            let id = ResourceId::new(name);
-                                            if let Some(resource) = orchestrator.get_resource(&id) {
-                                                let mut resource = resource.write().await;
-                                                let ctx = Context::new();
-                                                if let Err(e) = resource.start(&ctx).await {
-                                                    app.set_status(format!(
-                                                        "Failed to start {}: {}",
-                                                        name, e
-                                                    ));
-                                                }
-                                            }
-                                        }
-
-                                        let mut msg = String::new();
-                                        if !added.is_empty() {
-                                            msg.push_str(&format!("Added: {}", added.join(", ")));
-                                        }
-                                        if !removed.is_empty() {
-                                            if !msg.is_empty() {
-                                                msg.push_str(" | ");
-                                            }
-                                            msg.push_str(&format!(
-                                                "Removed: {}",
-                                                removed.join(", ")
-                                            ));
-                                        }
-                                        if msg.is_empty() {
-                                            msg = "Config reloaded (no changes)".to_string();
-                                        }
-                                        app.set_status(msg);
-                                    }
-                                    Err(e) => {
-                                        app.set_status(format!("Reload failed: {}", e));
-                                    }
-                                }
-                            }
+            loop {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.kind == KeyEventKind::Press {
+                        if let Some(action) = app.handle_key(key.code) {
+                            pending_actions.push(action);
                         }
                     }
                 }
+                // Drain remaining queued events without waiting
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
+        }
+
+        for action in pending_actions {
+            match action {
+                TuiAction::Restart(name) => {
+                    let id = ResourceId::new(&name);
+                    if let Some(resource) = orchestrator.get_resource(&id) {
+                        let mut resource = resource.write().await;
+                        let ctx = Context::new();
+                        match resource.stop(&ctx).await {
+                            Ok(()) => {
+                                if let Err(e) = resource.start(&ctx).await {
+                                    app.set_status(format!("Failed to restart: {}", e));
+                                } else {
+                                    app.set_status(format!("Restarted {}", name));
+                                }
+                            }
+                            Err(e) => app.set_status(format!("Failed: {}", e)),
+                        }
+                    } else {
+                        app.set_status(format!("Resource {} not found", name));
+                    }
+                }
+                TuiAction::Stop(name) => {
+                    let id = ResourceId::new(&name);
+                    if let Some(resource) = orchestrator.get_resource(&id) {
+                        let mut resource = resource.write().await;
+                        let ctx = Context::new();
+                        match resource.stop(&ctx).await {
+                            Ok(()) => app.set_status(format!("Stopped {}", name)),
+                            Err(e) => app.set_status(format!("Failed: {}", e)),
+                        }
+                    } else {
+                        app.set_status(format!("Resource {} not found", name));
+                    }
+                }
+                TuiAction::Reload => match ConfigStore::discover_and_load() {
+                    Ok(store) => {
+                        let mut added = Vec::new();
+                        let mut removed = Vec::new();
+
+                        let current_names: std::collections::HashSet<_> =
+                            app.service_infos().iter().map(|s| s.name.clone()).collect();
+                        let config_names: std::collections::HashSet<_> = store
+                            .list_enabled_resources()
+                            .map(|(n, _)| n.to_string())
+                            .collect();
+
+                        for (name, rc) in store.list_enabled_resources() {
+                            if !current_names.contains(name) {
+                                let svc = Service::from_resource_config(name, rc);
+                                let mut config = service_to_config(&svc, &project_dir);
+                                if let Some(ref env) = nix_env {
+                                    let user_env = std::mem::take(&mut config.environment);
+                                    config.environment = env.clone();
+                                    config.environment.extend(user_env);
+                                }
+                                orchestrator.add_resource(config);
+                                app.add_service(name.to_string());
+                                added.push(name.to_string());
+                            }
+                        }
+
+                        for name in &current_names {
+                            if !config_names.contains(name.as_str()) {
+                                app.remove_service(name);
+                                removed.push(name.clone());
+                            }
+                        }
+
+                        for name in &added {
+                            let id = ResourceId::new(name);
+                            if let Some(resource) = orchestrator.get_resource(&id) {
+                                let mut resource = resource.write().await;
+                                let ctx = Context::new();
+                                if let Err(e) = resource.start(&ctx).await {
+                                    app.set_status(format!("Failed to start {}: {}", name, e));
+                                }
+                            }
+                        }
+
+                        let mut msg = String::new();
+                        if !added.is_empty() {
+                            msg.push_str(&format!("Added: {}", added.join(", ")));
+                        }
+                        if !removed.is_empty() {
+                            if !msg.is_empty() {
+                                msg.push_str(" | ");
+                            }
+                            msg.push_str(&format!("Removed: {}", removed.join(", ")));
+                        }
+                        if msg.is_empty() {
+                            msg = "Config reloaded (no changes)".to_string();
+                        }
+                        app.set_status(msg);
+                    }
+                    Err(e) => {
+                        app.set_status(format!("Reload failed: {}", e));
+                    }
+                },
             }
         }
 

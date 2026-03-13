@@ -81,19 +81,23 @@ pub async fn run(
                         grp.done();
                     }
 
-                    if !yes {
+                    if yes {
+                        Some(result)
+                    } else {
                         print!("Continue with these settings? [Y/n] ");
                         io::stdout().flush()?;
                         let mut input = String::new();
                         io::stdin().read_line(&mut input)?;
                         let input = input.trim().to_lowercase();
                         if input == "n" || input == "no" {
-                            out.step("init").done_untimed("cancelled");
-                            return Ok(());
+                            None
+                        } else {
+                            Some(result)
                         }
                     }
+                } else {
+                    None
                 }
-                Some(result)
             }
             Err(e) => {
                 tracing::warn!("Codebase detection failed: {}", e);

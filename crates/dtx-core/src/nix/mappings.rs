@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Package mapping configuration file format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,12 +41,12 @@ impl MappingsConfig {
                     Some(config)
                 }
                 Err(e) => {
-                    warn!(?path, error = %e, "Failed to parse mappings config");
+                    debug!(?path, error = %e, "Failed to parse mappings config");
                     None
                 }
             },
             Err(e) => {
-                warn!(?path, error = %e, "Failed to read mappings config");
+                debug!(?path, error = %e, "Failed to read mappings config");
                 None
             }
         }

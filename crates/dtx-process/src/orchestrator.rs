@@ -256,7 +256,7 @@ impl ResourceOrchestrator {
             }
         }
 
-        self.running = result.is_success();
+        self.running = !result.started.is_empty();
         Ok(result)
     }
 
@@ -524,6 +524,31 @@ mod tests {
 
         let completed = Dependency::completed("api");
         assert_eq!(completed.condition, DependencyCondition::Completed);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_partial_start_is_running() {
+        let bus = Arc::new(ResourceEventBus::new());
+        let mut orchestrator = ResourceOrchestrator::new(bus);
+
+        // One valid resource that will start successfully
+        orchestrator.add_resource(make_config("good", "sleep 10"));
+        // One resource with a nonexistent working directory — spawn will fail
+        orchestrator.add_resource(
+            make_config("bad", "sleep 10")
+                .with_working_dir("/nonexistent_dir_dtx_test_partial_start"),
+        );
+
+        let result = orchestrator.start_all().await.unwrap();
+        assert!(!result.is_success(), "not all resources succeeded");
+        assert!(!result.started.is_empty(), "some resources started");
+        assert!(!result.failed.is_empty(), "some resources failed");
+        assert!(
+            orchestrator.is_running(),
+            "orchestrator should be running when at least one resource started"
+        );
+
+        orchestrator.stop_all().await.unwrap();
     }
 
     #[test]
