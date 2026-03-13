@@ -297,7 +297,8 @@ impl App {
 
     /// Remove expired transient failure entries (older than 3s).
     pub fn clean_recent_failures(&mut self) {
-        self.recent_failures.retain(|_, t| t.elapsed().as_secs() < 3);
+        self.recent_failures
+            .retain(|_, t| t.elapsed().as_secs() < 3);
     }
 
     /// Get service info for display.
@@ -397,21 +398,18 @@ impl App {
 
         // Auto-focus first failed service once startup settles
         if !self.startup_settled {
-            let all_settled = self.service_states.values().all(|s| {
-                !matches!(s, DisplayState::Pending | DisplayState::Starting)
-            });
+            let all_settled = self
+                .service_states
+                .values()
+                .all(|s| !matches!(s, DisplayState::Pending | DisplayState::Starting));
             if all_settled && !self.service_states.is_empty() {
                 self.startup_settled = true;
-                if let Some(idx) = self
-                    .service_names
-                    .iter()
-                    .position(|name| {
-                        matches!(
-                            self.service_states.get(name),
-                            Some(DisplayState::Failed { .. })
-                        )
-                    })
-                {
+                if let Some(idx) = self.service_names.iter().position(|name| {
+                    matches!(
+                        self.service_states.get(name),
+                        Some(DisplayState::Failed { .. })
+                    )
+                }) {
                     self.selected = idx;
                 }
             }

@@ -9,8 +9,7 @@ use ratatui::{
 };
 
 use super::app::{
-    App, DisplayHealth, DisplayState, DisplayStateFilter, ServiceDetail, ServiceDisplayInfo,
-    UiMode,
+    App, DisplayHealth, DisplayState, DisplayStateFilter, ServiceDetail, ServiceDisplayInfo, UiMode,
 };
 
 /// Create a centered overlay rectangle within the given area.
@@ -108,7 +107,10 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
         .filter(|(_, svc)| match app.filter_state {
             DisplayStateFilter::All => true,
             DisplayStateFilter::Running => {
-                matches!(svc.state, DisplayState::Running { .. } | DisplayState::Starting)
+                matches!(
+                    svc.state,
+                    DisplayState::Running { .. } | DisplayState::Starting
+                )
             }
             DisplayStateFilter::Failed => matches!(svc.state, DisplayState::Failed { .. }),
             DisplayStateFilter::Completed => matches!(svc.state, DisplayState::Completed { .. }),
