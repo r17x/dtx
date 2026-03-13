@@ -175,6 +175,32 @@ fn drain_reader<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+fn pid_file_path(service_name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(".dtx/pids").join(format!("{service_name}.pid"))
+}
+
+fn write_pid_file(service_name: &str, pid: u32) {
+    let path = pid_file_path(service_name);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, pid.to_string());
+}
+
+fn remove_pid_file(service_name: &str) {
+    let _ = std::fs::remove_file(pid_file_path(service_name));
+}
+
+fn read_pid_file(service_name: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_file_path(service_name))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
 impl ProcessResource {
     /// Create a new process resource.
     pub fn new(config: ProcessResourceConfig, event_bus: Arc<ResourceEventBus>) -> Self {
@@ -350,13 +376,16 @@ impl ProcessResource {
                             started_at: Some(started_at),
                             failed_at: Utc::now(),
                         };
-                        self.event_bus.publish(LifecycleEvent::Failed {
-                            id: self.config.id.clone(),
-                            kind: ResourceKind::Process,
+                        self.event_bus.publish(LifecycleEvent::stderr(
+                            self.config.id.clone(),
+                            format!("process exited: {error}"),
+                        ));
+                        self.event_bus.publish(LifecycleEvent::failed(
+                            self.config.id.clone(),
+                            ResourceKind::Process,
                             error,
                             exit_code,
-                            timestamp: Utc::now(),
-                        });
+                        ));
                     }
 
                     self.child = None;
@@ -375,6 +404,27 @@ impl ProcessResource {
 
     /// Spawn the main process.
     async fn spawn_process(&mut self) -> ResourceResult<()> {
+        // Clean up stale process from a previous run
+        let service_name = self.config.id.as_str();
+        if let Some(stale_pid) = read_pid_file(service_name) {
+            if is_process_alive(stale_pid) {
+                warn!(pid = stale_pid, service = %self.config.id, "killing stale process from previous run");
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(stale_pid as i32), libc::SIGKILL);
+                }
+                let descendants = crate::get_descendant_pids(stale_pid);
+                for desc_pid in descendants {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(desc_pid as i32, libc::SIGKILL);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            remove_pid_file(service_name);
+        }
+
         let working_dir = self.config.effective_working_dir();
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
@@ -389,6 +439,20 @@ impl ProcessResource {
         for (key, value) in &self.config.environment {
             cmd.env(key, value);
         }
+
+        // Isolate the child into its own process group so signals
+        // (SIGTERM, SIGKILL) reach the entire tree of descendants.
+        #[cfg(unix)]
+        {
+            // SAFETY: setpgid is async-signal-safe per POSIX
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = cmd.spawn().map_err(|e| {
             Box::new(std::io::Error::other(format!(
                 "Failed to spawn process: {}",
@@ -397,6 +461,11 @@ impl ProcessResource {
         })?;
 
         let pid = child.id();
+
+        // Register PID file for crash recovery
+        if let Some(p) = pid {
+            write_pid_file(self.config.id.as_str(), p);
+        }
 
         // Capture stdout/stderr for log streaming
         if let Some(stdout) = child.stdout.take() {
@@ -430,7 +499,7 @@ impl ProcessResource {
             if let Some(pid) = child.id() {
                 let sig = signal.as_libc();
                 unsafe {
-                    if libc::kill(pid as i32, sig) != 0 {
+                    if libc::kill(-(pid as i32), sig) != 0 {
                         return Err(Box::new(std::io::Error::last_os_error()));
                     }
                 }
@@ -498,13 +567,16 @@ impl Resource for ProcessResource {
                 started_at: None,
                 failed_at: Utc::now(),
             };
-            self.event_bus.publish(LifecycleEvent::Failed {
-                id: self.config.id.clone(),
-                kind: ResourceKind::Process,
+            self.event_bus.publish(LifecycleEvent::stderr(
+                self.config.id.clone(),
+                format!("failed to spawn: {e}"),
+            ));
+            self.event_bus.publish(LifecycleEvent::failed(
+                self.config.id.clone(),
+                ResourceKind::Process,
                 error,
-                exit_code: None,
-                timestamp: Utc::now(),
-            });
+                None,
+            ));
             return Err(e);
         }
 
@@ -591,10 +663,29 @@ impl Resource for ProcessResource {
                     error!(id = %self.config.id, error = %e, "Error waiting for process");
                 }
                 Err(_) => {
-                    // Timeout - force kill
-                    warn!(id = %self.config.id, "Graceful shutdown timed out, killing process");
-                    if let Err(e) = child.kill().await {
-                        error!(id = %self.config.id, error = %e, "Failed to kill process");
+                    // Timeout - force kill the entire process group
+                    warn!(id = %self.config.id, "Graceful shutdown timed out, killing process group");
+                    #[cfg(unix)]
+                    {
+                        if let Some(pid) = child.id() {
+                            unsafe {
+                                libc::kill(-(pid as i32), libc::SIGKILL);
+                            }
+                            // Layer 2: Kill any descendants that escaped the process group
+                            let descendants = crate::get_descendant_pids(pid);
+                            for desc_pid in descendants {
+                                unsafe {
+                                    libc::kill(desc_pid as i32, libc::SIGKILL);
+                                }
+                            }
+                        }
+                        let _ = child.wait().await;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        if let Err(e) = child.kill().await {
+                            error!(id = %self.config.id, error = %e, "Failed to kill process");
+                        }
                     }
                     self.state = ResourceState::Stopped {
                         exit_code: None,
@@ -613,12 +704,35 @@ impl Resource for ProcessResource {
 
         self.child = None;
         self.probe_runner = None;
+        remove_pid_file(self.config.id.as_str());
 
         Ok(())
     }
 
     async fn kill(&mut self, _ctx: &Context) -> ResourceResult<()> {
         if let Some(ref mut child) = self.child {
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.id() {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                    // Layer 2: Kill any descendants that escaped the process group
+                    let descendants = crate::get_descendant_pids(pid);
+                    for desc_pid in descendants {
+                        unsafe {
+                            libc::kill(desc_pid as i32, libc::SIGKILL);
+                        }
+                    }
+                }
+                child.wait().await.map_err(|e| {
+                    Box::new(std::io::Error::other(format!(
+                        "Failed to reap process: {}",
+                        e
+                    ))) as ResourceError
+                })?;
+            }
+            #[cfg(not(unix))]
             child.kill().await.map_err(|e| {
                 Box::new(std::io::Error::other(format!(
                     "Failed to kill process: {}",
@@ -639,6 +753,7 @@ impl Resource for ProcessResource {
                 timestamp: Utc::now(),
             });
             self.child = None;
+            remove_pid_file(self.config.id.as_str());
         }
         Ok(())
     }
@@ -673,6 +788,29 @@ impl Resource for ProcessResource {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl Drop for ProcessResource {
+    fn drop(&mut self) {
+        // Last-resort cleanup — kill process group + descendants
+        if let Some(ref child) = self.child {
+            if let Some(pid) = child.id() {
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                    let descendants = crate::get_descendant_pids(pid);
+                    for desc_pid in descendants {
+                        unsafe {
+                            libc::kill(desc_pid as i32, libc::SIGKILL);
+                        }
+                    }
+                }
+                remove_pid_file(self.config.id.as_str());
+            }
+        }
     }
 }
 

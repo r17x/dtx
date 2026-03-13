@@ -80,7 +80,7 @@ impl LogStore {
                 }
             });
 
-            let prefix = if log.is_stderr { "ERR" } else { "OUT" };
+            let prefix = if log.is_stderr { "2" } else { "1" };
             if writeln!(file.writer, "[{}] {}", prefix, log.content).is_ok() {
                 file.total_lines += 1;
             }
@@ -309,9 +309,15 @@ impl LogStore {
 }
 
 fn parse_log_line(service: &str, line: String) -> DisplayLog {
-    let (is_stderr, content) = if let Some(rest) = line.strip_prefix("[ERR] ") {
+    let (is_stderr, content) = if let Some(rest) = line.strip_prefix("[2] ") {
+        (true, rest.to_string())
+    } else if let Some(rest) = line.strip_prefix("[1] ") {
+        (false, rest.to_string())
+    } else if let Some(rest) = line.strip_prefix("[ERR] ") {
+        // Legacy format compatibility
         (true, rest.to_string())
     } else if let Some(rest) = line.strip_prefix("[OUT] ") {
+        // Legacy format compatibility
         (false, rest.to_string())
     } else {
         (false, line)

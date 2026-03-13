@@ -1,5 +1,7 @@
 //! TUI rendering.
 
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,7 +10,9 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, DisplayHealth, DisplayState, ServiceDetail, ServiceDisplayInfo, UiMode};
+use super::app::{
+    App, DisplayHealth, DisplayState, DisplayStateFilter, ServiceDetail, ServiceDisplayInfo, UiMode,
+};
 
 /// Create a centered overlay rectangle within the given area.
 fn centered_overlay(area: Rect, width: u16, height: u16) -> Rect {
@@ -30,7 +34,7 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
         ])
         .split(f.area());
 
-    draw_header(f, chunks[0]);
+    draw_header(f, app, chunks[0]);
     draw_main(f, app, service_infos, chunks[1]);
     draw_footer(f, app, chunks[2]);
 
@@ -49,7 +53,12 @@ pub fn draw_with_infos(f: &mut Frame, app: &App, service_infos: &[ServiceDisplay
 }
 
 /// Draw the header.
-fn draw_header(f: &mut Frame, area: Rect) {
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let run_count = app.running_count();
+    let done_count = app.completed_count();
+    let err_count = app.failed_count();
+    let tally = format!("{run_count} RUN \u{00b7} {done_count} DON \u{00b7} {err_count} ERR");
+
     let header = Paragraph::new(vec![Line::from(vec![
         Span::styled(
             " dtx ",
@@ -59,8 +68,7 @@ fn draw_header(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("native", Style::default().fg(Color::Cyan)),
-        Span::raw(" process manager"),
+        Span::styled(&tally, Style::default().fg(Color::DarkGray)),
     ])])
     .block(
         Block::default()
@@ -95,10 +103,25 @@ fn draw_main(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], are
 
 /// Draw the service list.
 fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo], area: Rect) {
-    let items: Vec<ListItem> = service_infos
+    let filtered_infos: Vec<(usize, &ServiceDisplayInfo)> = service_infos
         .iter()
         .enumerate()
-        .map(|(i, svc)| {
+        .filter(|(_, svc)| match app.filter_state {
+            DisplayStateFilter::All => true,
+            DisplayStateFilter::Running => {
+                matches!(
+                    svc.state,
+                    DisplayState::Running { .. } | DisplayState::Starting
+                )
+            }
+            DisplayStateFilter::Failed => matches!(svc.state, DisplayState::Failed { .. }),
+            DisplayStateFilter::Completed => matches!(svc.state, DisplayState::Completed { .. }),
+        })
+        .collect();
+
+    let items: Vec<ListItem> = filtered_infos
+        .iter()
+        .map(|&(i, svc)| {
             let (indicator, color) = match &svc.state {
                 DisplayState::Running { .. } => ("●", Color::Green),
                 DisplayState::Starting => ("◐", Color::Yellow),
@@ -108,13 +131,16 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
                 DisplayState::Failed { .. } => ("✗", Color::Red),
             };
 
-            let state_label = match &svc.state {
-                DisplayState::Running { .. } => "RUN",
-                DisplayState::Starting => "STR",
-                DisplayState::Pending => "PND",
-                DisplayState::Stopped => "STP",
-                DisplayState::Completed { .. } => "DON",
-                DisplayState::Failed { .. } => "ERR",
+            let state_label: Cow<'_, str> = match &svc.state {
+                DisplayState::Running { .. } => "RUN".into(),
+                DisplayState::Starting => "STR".into(),
+                DisplayState::Pending => "PND".into(),
+                DisplayState::Stopped => "STP".into(),
+                DisplayState::Completed { .. } => "DON".into(),
+                DisplayState::Failed { error } => match error {
+                    Some(e) => format!("ERR: {e}").into(),
+                    None => "ERR".into(),
+                },
             };
 
             let restart_info = if svc.restarts > 0 {
@@ -136,10 +162,17 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
                 None => Span::raw(""),
             };
 
+            let is_recent_failure = app
+                .recent_failures
+                .get(&svc.name)
+                .is_some_and(|t| t.elapsed().as_secs() < 3);
+
             let style = if i == app.selected {
                 Style::default()
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD)
+            } else if is_recent_failure {
+                Style::default().add_modifier(Modifier::BOLD)
             } else if let Some(bg) = health_bg {
                 Style::default().bg(bg)
             } else {
@@ -160,40 +193,24 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
         })
         .collect();
 
+    let err_count = service_infos
+        .iter()
+        .filter(|s| matches!(s.state, DisplayState::Failed { .. }))
+        .count();
+    let title = if err_count > 0 {
+        format!(" Services ({err_count} ERR) ")
+    } else {
+        " Services ".to_string()
+    };
+
     let services = List::new(items).block(
         Block::default()
-            .title(" Services ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan)),
     );
 
     f.render_widget(services, area);
-}
-
-/// Check if a log line looks like an error based on content.
-/// Uses byte-level case-insensitive matching to avoid allocating on the render hot path.
-fn is_error_line(content: &str) -> bool {
-    fn starts_with_ci(s: &str, pat: &str) -> bool {
-        s.as_bytes()
-            .get(..pat.len())
-            .is_some_and(|b| b.eq_ignore_ascii_case(pat.as_bytes()))
-    }
-    fn contains_ci(s: &str, pat: &str) -> bool {
-        s.as_bytes()
-            .windows(pat.len())
-            .any(|w| w.eq_ignore_ascii_case(pat.as_bytes()))
-    }
-    starts_with_ci(content, "error")
-        || starts_with_ci(content, "fatal")
-        || starts_with_ci(content, "panic")
-        || contains_ci(content, "\"level\":\"error\"")
-        || contains_ci(content, "\"level\":\"fatal\"")
-        || contains_ci(content, "[error]")
-        || contains_ci(content, "[fatal]")
-        || contains_ci(content, " error:")
-        || contains_ci(content, " fatal:")
-        || contains_ci(content, "level=error")
-        || contains_ci(content, "level=fatal")
 }
 
 /// Draw the service detail panel.
@@ -316,8 +333,10 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     let visible_logs: Vec<Line> = visible
         .iter()
         .map(|log| {
-            let base_style = if log.is_stderr || is_error_line(&log.content) {
+            let base_style = if log.is_error() {
                 Style::default().fg(Color::Red)
+            } else if log.is_stderr {
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
@@ -423,6 +442,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         UiMode::Normal => vec![
             ("j/k", "Navigate"),
             ("Enter", "Detail"),
+            ("f", "State"),
             ("/", "Search"),
             ("F", "Filter"),
             ("s", "Stop"),
@@ -473,6 +493,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // Add state filter indicator when active
+    if app.filter_state != DisplayStateFilter::All {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("[Filter: {}]", app.filter_state.label()),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Add status message if present
     if let Some(ref msg) = app.status_message {
         spans.push(Span::raw("  │  "));
@@ -517,6 +548,10 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  Esc     ", key_style),
             Span::raw("Back / Close"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f       ", key_style),
+            Span::raw("Cycle state filter"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(" Logs", group_style)),
