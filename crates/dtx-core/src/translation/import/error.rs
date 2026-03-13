@@ -29,6 +29,10 @@ pub enum ImportError {
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    /// JSON parse error.
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// Merge conflict.
     #[error("merge conflict for '{name}': {reason}")]
     MergeConflict { name: String, reason: String },

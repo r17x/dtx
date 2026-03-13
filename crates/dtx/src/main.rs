@@ -487,7 +487,7 @@ async fn run(out: &output::Output) -> Result<()> {
                 no_nix,
                 dry_run,
             },
-        ),
+        ).await,
 
         Commands::Add(args) => cmd::add::run(
             &mut ctx,

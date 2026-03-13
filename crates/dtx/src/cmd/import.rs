@@ -289,7 +289,7 @@ fn normalize_imported_config(config: &mut ImportedConfig, out: &Output) {
 }
 
 /// Run the import command.
-pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
+pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     let ImportArgs {
         file,
         format,
@@ -326,6 +326,17 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     // Normalize all names in-place (underscores→hyphens, uppercase→lowercase)
     // so display, store ops, and dependency references all use canonical form.
     normalize_imported_config(&mut config, out);
+
+    // Sanitize nix store paths if nix is available
+    if !no_nix {
+        if let Some(path) = get_devshell_path(ctx.store.project_root()).await {
+            let count = dtx_core::translation::import::sanitize_nix_commands(&mut config, &path);
+            if count > 0 {
+                out.step("nix")
+                    .done_untimed(&format!("sanitized nix store paths in {} command(s)", count));
+            }
+        }
+    }
 
     if dry_run {
         display_import_summary(out, &config);
@@ -396,4 +407,20 @@ pub fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()> {
     dtx_core::notify_config_changed_sync();
 
     Ok(())
+}
+
+async fn get_devshell_path(project_root: &std::path::Path) -> Option<String> {
+    use dtx_core::nix::DevEnvironment;
+
+    if !project_root.join("flake.nix").exists() {
+        return None;
+    }
+
+    match DevEnvironment::from_flake_auto(project_root).await {
+        Ok(env) => env.path().map(|p| p.to_string()),
+        Err(e) => {
+            tracing::debug!("devShell eval failed, skipping nix path sanitization: {}", e);
+            None
+        }
+    }
 }

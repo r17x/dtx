@@ -38,7 +38,9 @@ impl ImportFormat {
 
         // Check process-compose
         if name_lower.starts_with("process-compose")
-            && (name_lower.ends_with(".yaml") || name_lower.ends_with(".yml"))
+            && (name_lower.ends_with(".yaml")
+                || name_lower.ends_with(".yml")
+                || name_lower.ends_with(".json"))
         {
             return Some(Self::ProcessCompose);
         }
@@ -49,6 +51,11 @@ impl ImportFormat {
     /// Detect format from content.
     pub fn from_content(content: &str) -> Option<Self> {
         let content = content.trim();
+
+        // JSON process-compose: starts with `{` and contains `"processes"`
+        if content.trim_start().starts_with('{') && content.contains("\"processes\"") {
+            return Some(Self::ProcessCompose);
+        }
 
         // Procfile: lines like "web: command"
         if content.lines().all(|line| {
@@ -205,5 +212,47 @@ impl ImportedResource {
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = Some(image.into());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_path_process_compose_json() {
+        let path = Path::new("process-compose.json");
+        assert_eq!(
+            ImportFormat::from_path(path),
+            Some(ImportFormat::ProcessCompose)
+        );
+    }
+
+    #[test]
+    fn from_path_process_compose_yaml() {
+        let path = Path::new("process-compose.yaml");
+        assert_eq!(
+            ImportFormat::from_path(path),
+            Some(ImportFormat::ProcessCompose)
+        );
+    }
+
+    #[test]
+    fn from_content_json_processes() {
+        let content = r#"{ "processes": { "api": { "command": "npm start" } } }"#;
+        assert_eq!(
+            ImportFormat::from_content(content),
+            Some(ImportFormat::ProcessCompose)
+        );
+    }
+
+    #[test]
+    fn from_content_json_no_processes() {
+        let content = r#"{ "services": { "web": {} } }"#;
+        // JSON with "services" but no "processes" should not match ProcessCompose
+        assert_ne!(
+            ImportFormat::from_content(content),
+            Some(ImportFormat::ProcessCompose)
+        );
     }
 }

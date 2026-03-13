@@ -220,6 +220,11 @@ pub fn is_local_binary(command: &str) -> bool {
         .find(|s| !s.contains('='))
         .unwrap_or("");
 
+    // Nix store paths are not local binaries — they are managed by Nix
+    if actual_cmd.starts_with("/nix/store/") {
+        return false;
+    }
+
     actual_cmd.starts_with("./")
         || actual_cmd.starts_with("../")
         || actual_cmd.starts_with('/')
@@ -377,6 +382,63 @@ pub fn get_services_needing_attention(
         .into_iter()
         .filter(|a| matches!(a.result, PackageAnalysisResult::NeedsAttention(_)))
         .collect()
+}
+
+/// Returns `true` if the path points into the Nix store (`/nix/store/...`).
+pub fn is_nix_store_path(path: &str) -> bool {
+    path.starts_with("/nix/store/")
+}
+
+/// Rewrites nix store paths in a command to bare executable names
+/// when the executable is found on the provided PATH.
+///
+/// For each whitespace-separated token matching `/nix/store/.../bin/<name>`:
+///   - Extract `<name>` (basename after last `/`)
+///   - Check if any PATH directory contains the executable (`std::fs::metadata`)
+///   - If found: replace token with basename
+///   - If not: keep as-is, push warning
+///
+/// Returns `(sanitized_command, warnings)`.
+pub fn sanitize_nix_store_paths(command: &str, path_env: &str) -> (String, Vec<String>) {
+    let mut warnings = Vec::new();
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut result_tokens: Vec<String> = Vec::with_capacity(tokens.len());
+
+    let path_dirs: Vec<&str> = path_env.split(':').collect();
+
+    for token in &tokens {
+        if !is_nix_store_path(token) {
+            result_tokens.push((*token).to_string());
+            continue;
+        }
+
+        let basename = match token.rsplit('/').next() {
+            Some(name) if !name.is_empty() => name,
+            _ => {
+                result_tokens.push((*token).to_string());
+                continue;
+            }
+        };
+
+        let found_on_path = path_dirs.iter().any(|dir| {
+            if dir.is_empty() {
+                return false;
+            }
+            let candidate = format!("{dir}/{basename}");
+            std::fs::metadata(&candidate).is_ok()
+        });
+
+        if found_on_path {
+            result_tokens.push(basename.to_string());
+        } else {
+            warnings.push(format!(
+                "nix store path not found on PATH, keeping as-is: {token}"
+            ));
+            result_tokens.push((*token).to_string());
+        }
+    }
+
+    (result_tokens.join(" "), warnings)
 }
 
 #[cfg(test)]
@@ -572,5 +634,93 @@ mod tests {
         assert_eq!(needs_attention.len(), 2);
         assert!(needs_attention.iter().any(|a| a.service_name == "unknown1"));
         assert!(needs_attention.iter().any(|a| a.service_name == "unknown2"));
+    }
+
+    #[test]
+    fn test_is_nix_store_path() {
+        assert!(is_nix_store_path("/nix/store/abc123-nodejs-20/bin/node"));
+        assert!(is_nix_store_path("/nix/store/hash-pkg/bin/thing"));
+        assert!(!is_nix_store_path("/usr/bin/node"));
+        assert!(!is_nix_store_path("node"));
+        assert!(!is_nix_store_path("./bin/node"));
+        assert!(!is_nix_store_path(""));
+    }
+
+    #[test]
+    fn test_is_local_binary_nix_store_returns_false() {
+        assert!(!is_local_binary("/nix/store/abc123-nodejs-20/bin/node"));
+        assert!(!is_local_binary(
+            "/nix/store/xyz-redis-7.0/bin/redis-server --port 6379"
+        ));
+    }
+
+    #[test]
+    fn test_sanitize_replaces_store_path_with_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("node");
+        std::fs::write(&bin, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path_env = dir.path().to_str().unwrap();
+        let (result, warnings) = sanitize_nix_store_paths(
+            "/nix/store/abc123-nodejs-20/bin/node",
+            path_env,
+        );
+        assert_eq!(result, "node");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_preserves_args_after_store_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("node");
+        std::fs::write(&bin, "").unwrap();
+
+        let path_env = dir.path().to_str().unwrap();
+        let (result, warnings) = sanitize_nix_store_paths(
+            "/nix/store/abc123-nodejs-20/bin/node app.js --port 3000",
+            path_env,
+        );
+        assert_eq!(result, "node app.js --port 3000");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_not_on_path_keeps_original_warns() {
+        let (result, warnings) = sanitize_nix_store_paths(
+            "/nix/store/abc123-nodejs-20/bin/node app.js",
+            "/nonexistent/path",
+        );
+        assert_eq!(result, "/nix/store/abc123-nodejs-20/bin/node app.js");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("not found on PATH"));
+    }
+
+    #[test]
+    fn test_sanitize_no_store_paths_unchanged() {
+        let (result, warnings) = sanitize_nix_store_paths("node app.js --port 3000", "/usr/bin");
+        assert_eq!(result, "node app.js --port 3000");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_multiple_store_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in &["node", "redis-server"] {
+            let bin = dir.path().join(name);
+            std::fs::write(&bin, "").unwrap();
+        }
+
+        let path_env = dir.path().to_str().unwrap();
+        let (result, warnings) = sanitize_nix_store_paths(
+            "/nix/store/aaa-nodejs/bin/node && /nix/store/bbb-redis/bin/redis-server --port 6379",
+            path_env,
+        );
+        assert_eq!(result, "node && redis-server --port 6379");
+        assert!(warnings.is_empty());
     }
 }
