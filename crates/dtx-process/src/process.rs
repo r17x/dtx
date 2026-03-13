@@ -376,19 +376,16 @@ impl ProcessResource {
                             started_at: Some(started_at),
                             failed_at: Utc::now(),
                         };
-                        self.event_bus.publish(LifecycleEvent::Log {
-                            id: self.config.id.clone(),
-                            stream: LogStreamKind::Stderr,
-                            line: format!("process exited: {error}"),
-                            timestamp: Utc::now(),
-                        });
-                        self.event_bus.publish(LifecycleEvent::Failed {
-                            id: self.config.id.clone(),
-                            kind: ResourceKind::Process,
+                        self.event_bus.publish(LifecycleEvent::stderr(
+                            self.config.id.clone(),
+                            format!("process exited: {error}"),
+                        ));
+                        self.event_bus.publish(LifecycleEvent::failed(
+                            self.config.id.clone(),
+                            ResourceKind::Process,
                             error,
                             exit_code,
-                            timestamp: Utc::now(),
-                        });
+                        ));
                     }
 
                     self.child = None;
@@ -570,19 +567,16 @@ impl Resource for ProcessResource {
                 started_at: None,
                 failed_at: Utc::now(),
             };
-            self.event_bus.publish(LifecycleEvent::Log {
-                id: self.config.id.clone(),
-                stream: LogStreamKind::Stderr,
-                line: format!("failed to spawn: {e}"),
-                timestamp: Utc::now(),
-            });
-            self.event_bus.publish(LifecycleEvent::Failed {
-                id: self.config.id.clone(),
-                kind: ResourceKind::Process,
+            self.event_bus.publish(LifecycleEvent::stderr(
+                self.config.id.clone(),
+                format!("failed to spawn: {e}"),
+            ));
+            self.event_bus.publish(LifecycleEvent::failed(
+                self.config.id.clone(),
+                ResourceKind::Process,
                 error,
-                exit_code: None,
-                timestamp: Utc::now(),
-            });
+                None,
+            ));
             return Err(e);
         }
 

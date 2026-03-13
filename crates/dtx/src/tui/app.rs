@@ -38,6 +38,34 @@ pub struct DisplayLog {
     pub is_stderr: bool,
 }
 
+impl DisplayLog {
+    /// Detect error-level content using byte-level case-insensitive matching.
+    pub fn is_error(&self) -> bool {
+        fn starts_with_ci(s: &str, pat: &str) -> bool {
+            s.as_bytes()
+                .get(..pat.len())
+                .is_some_and(|b| b.eq_ignore_ascii_case(pat.as_bytes()))
+        }
+        fn contains_ci(s: &str, pat: &str) -> bool {
+            s.as_bytes()
+                .windows(pat.len())
+                .any(|w| w.eq_ignore_ascii_case(pat.as_bytes()))
+        }
+        let c = &self.content;
+        starts_with_ci(c, "error")
+            || starts_with_ci(c, "fatal")
+            || starts_with_ci(c, "panic")
+            || contains_ci(c, "\"level\":\"error\"")
+            || contains_ci(c, "\"level\":\"fatal\"")
+            || contains_ci(c, "[error]")
+            || contains_ci(c, "[fatal]")
+            || contains_ci(c, " error:")
+            || contains_ci(c, " fatal:")
+            || contains_ci(c, "level=error")
+            || contains_ci(c, "level=fatal")
+    }
+}
+
 /// Service info for display (derived from events).
 pub struct ServiceDisplayInfo {
     pub name: String,

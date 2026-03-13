@@ -1,5 +1,7 @@
 //! TUI rendering.
 
+use std::borrow::Cow;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -129,15 +131,15 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
                 DisplayState::Failed { .. } => ("✗", Color::Red),
             };
 
-            let state_label = match &svc.state {
-                DisplayState::Running { .. } => "RUN".to_string(),
-                DisplayState::Starting => "STR".to_string(),
-                DisplayState::Pending => "PND".to_string(),
-                DisplayState::Stopped => "STP".to_string(),
-                DisplayState::Completed { .. } => "DON".to_string(),
+            let state_label: Cow<'_, str> = match &svc.state {
+                DisplayState::Running { .. } => "RUN".into(),
+                DisplayState::Starting => "STR".into(),
+                DisplayState::Pending => "PND".into(),
+                DisplayState::Stopped => "STP".into(),
+                DisplayState::Completed { .. } => "DON".into(),
                 DisplayState::Failed { error } => match error {
-                    Some(e) => format!("ERR: {e}"),
-                    None => "ERR".to_string(),
+                    Some(e) => format!("ERR: {e}").into(),
+                    None => "ERR".into(),
                 },
             };
 
@@ -209,32 +211,6 @@ fn draw_services(f: &mut Frame, app: &App, service_infos: &[ServiceDisplayInfo],
     );
 
     f.render_widget(services, area);
-}
-
-/// Check if a log line looks like an error based on content.
-/// Uses byte-level case-insensitive matching to avoid allocating on the render hot path.
-fn is_error_line(content: &str) -> bool {
-    fn starts_with_ci(s: &str, pat: &str) -> bool {
-        s.as_bytes()
-            .get(..pat.len())
-            .is_some_and(|b| b.eq_ignore_ascii_case(pat.as_bytes()))
-    }
-    fn contains_ci(s: &str, pat: &str) -> bool {
-        s.as_bytes()
-            .windows(pat.len())
-            .any(|w| w.eq_ignore_ascii_case(pat.as_bytes()))
-    }
-    starts_with_ci(content, "error")
-        || starts_with_ci(content, "fatal")
-        || starts_with_ci(content, "panic")
-        || contains_ci(content, "\"level\":\"error\"")
-        || contains_ci(content, "\"level\":\"fatal\"")
-        || contains_ci(content, "[error]")
-        || contains_ci(content, "[fatal]")
-        || contains_ci(content, " error:")
-        || contains_ci(content, " fatal:")
-        || contains_ci(content, "level=error")
-        || contains_ci(content, "level=fatal")
 }
 
 /// Draw the service detail panel.
@@ -357,7 +333,7 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     let visible_logs: Vec<Line> = visible
         .iter()
         .map(|log| {
-            let base_style = if is_error_line(&log.content) {
+            let base_style = if log.is_error() {
                 Style::default().fg(Color::Red)
             } else if log.is_stderr {
                 Style::default().fg(Color::DarkGray)
