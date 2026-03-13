@@ -566,6 +566,10 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
             Span::styled("  Esc     ", key_style),
             Span::raw("Back / Close"),
         ]),
+        Line::from(vec![
+            Span::styled("  f       ", key_style),
+            Span::raw("Cycle state filter"),
+        ]),
         Line::raw(""),
         Line::from(Span::styled(" Logs", group_style)),
         Line::from(vec![
