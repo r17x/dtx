@@ -102,13 +102,14 @@ impl ServiceName {
     /// - Converts underscores to hyphens
     /// - Collapses consecutive separators
     /// - Strips leading/trailing hyphens
+    /// - Converts spaces to hyphens (word separators)
     /// - Drops non-alphanumeric, non-separator characters
     pub fn normalize(s: &str) -> String {
         let mut result = String::with_capacity(s.len());
         let mut prev_hyphen = false;
         for c in s.chars() {
             match c {
-                '_' | '-' => {
+                '_' | '-' | ' ' => {
                     if !prev_hyphen && !result.is_empty() {
                         result.push('-');
                     }
@@ -285,10 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn space_dropped_during_normalization() {
-        // Spaces are dropped silently during normalization
+    fn space_becomes_hyphen_during_normalization() {
+        // Spaces are treated as word separators → hyphens
         let name: ServiceName = "my api".parse().unwrap();
-        assert_eq!(name.as_str(), "myapi");
+        assert_eq!(name.as_str(), "my-api");
     }
 
     #[test]
