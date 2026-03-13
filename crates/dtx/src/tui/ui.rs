@@ -357,8 +357,10 @@ fn draw_logs(f: &mut Frame, app: &App, selected_service: Option<&str>, area: Rec
     let visible_logs: Vec<Line> = visible
         .iter()
         .map(|log| {
-            let base_style = if log.is_stderr || is_error_line(&log.content) {
+            let base_style = if is_error_line(&log.content) {
                 Style::default().fg(Color::Red)
+            } else if log.is_stderr {
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
