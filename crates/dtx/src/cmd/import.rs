@@ -396,7 +396,12 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
 
     let mut created_count = 0;
     let mut skipped_count = 0;
-    let mut details: Vec<(String, String, bool)> = Vec::new(); // (name, note, failed)
+    struct ImportDetail {
+        name: String,
+        note: String,
+        failed: bool,
+    }
+    let mut details: Vec<ImportDetail> = Vec::new();
 
     for resource in &config.resources {
         // Check if service already exists
@@ -434,11 +439,19 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
                     "added".to_string()
                 };
 
-                details.push((resource.name.clone(), flake_note, false));
+                details.push(ImportDetail {
+                    name: resource.name.clone(),
+                    note: flake_note,
+                    failed: false,
+                });
                 created_count += 1;
             }
             Err(e) => {
-                details.push((resource.name.clone(), format!("{}", e), true));
+                details.push(ImportDetail {
+                    name: resource.name.clone(),
+                    note: format!("{}", e),
+                    failed: true,
+                });
             }
         }
     }
@@ -453,11 +466,11 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
     pipe.finish();
 
     // Show per-resource details below the pipeline
-    for (name, note, failed) in &details {
-        if *failed {
-            out.step_child(name).fail_untimed(note);
+    for d in &details {
+        if d.failed {
+            out.step_child(&d.name).fail_untimed(&d.note);
         } else {
-            out.step_child(name).done_untimed(note);
+            out.step_child(&d.name).done_untimed(&d.note);
         }
     }
 

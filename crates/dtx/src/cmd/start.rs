@@ -392,10 +392,13 @@ async fn build_flake_packages(
             continue;
         }
         // Check if already on PATH
-        let found = path_env.split(':').any(|dir| {
-            let bin = std::path::Path::new(dir).join(&target);
-            bin.exists() && bin.is_file()
-        });
+        let found = path_env
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .any(|dir| {
+                let bin = std::path::Path::new(dir).join(&target);
+                bin.exists() && bin.is_file()
+            });
         if !found && !to_build.contains(pkg) {
             to_build.push(pkg.clone());
         }
