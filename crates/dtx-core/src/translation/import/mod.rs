@@ -105,13 +105,14 @@ pub fn export_custom_scripts(
     config.warnings.extend(result.warnings);
 
     // 6. Rewrite commands: replace /nix/store/.../bin/<name> with just <name>
-    //    for each exported package
+    //    and mark the resource with the nix package it needs
     for resource in &mut config.resources {
         if let Some(ref mut cmd) = resource.command {
             for pkg_name in &result.exported_packages {
                 let new_cmd = rewrite_store_path_for_package(cmd, pkg_name);
                 if new_cmd != *cmd {
                     *cmd = new_cmd;
+                    resource.nix_packages.push(pkg_name.clone());
                 }
             }
         }
@@ -121,17 +122,38 @@ pub fn export_custom_scripts(
 }
 
 /// Rewrite nix store paths in a command whose basename matches `package_name`.
-/// Preserves original whitespace.
+/// Preserves original whitespace by rebuilding from token boundaries.
 fn rewrite_store_path_for_package(command: &str, package_name: &str) -> String {
-    let mut result = command.to_string();
-    for token in command.split_whitespace() {
-        if !token.starts_with("/nix/store/") {
-            continue;
-        }
-        if let Some(basename) = token.rsplit('/').next() {
-            if basename == package_name {
-                result = result.replacen(token, basename, 1);
+    use crate::nix::command::is_nix_store_path;
+
+    let mut result = String::with_capacity(command.len());
+    let mut chars = command.char_indices().peekable();
+
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            result.push(c);
+            chars.next();
+        } else {
+            // Find end of token
+            let start = i;
+            while let Some(&(_, tc)) = chars.peek() {
+                if tc.is_whitespace() {
+                    break;
+                }
+                chars.next();
             }
+            let end = chars.peek().map(|&(j, _)| j).unwrap_or(command.len());
+            let token = &command[start..end];
+
+            if is_nix_store_path(token) {
+                if let Some(basename) = token.rsplit('/').next() {
+                    if basename == package_name {
+                        result.push_str(basename);
+                        continue;
+                    }
+                }
+            }
+            result.push_str(token);
         }
     }
     result

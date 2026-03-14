@@ -159,6 +159,9 @@ pub struct ImportedResource {
 
     /// Source line number (for error reporting).
     pub source_line: Option<usize>,
+
+    /// Nix flake packages this resource needs (set by export_custom_scripts).
+    pub nix_packages: Vec<String>,
 }
 
 impl ImportedResource {
@@ -175,6 +178,7 @@ impl ImportedResource {
             health_check: None,
             restart: None,
             source_line: None,
+            nix_packages: Vec::new(),
         }
     }
 
