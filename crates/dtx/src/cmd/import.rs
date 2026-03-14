@@ -132,10 +132,11 @@ fn display_import_summary(out: &Output, config: &ImportedConfig) {
 }
 
 /// Infer Nix package from resource.
-fn infer_nix_package(resource: &ImportedResource) -> Option<String> {
-    use dtx_core::nix::{extract_executable, PackageMappings};
-
-    let mappings = PackageMappings::load();
+fn infer_nix_package(
+    resource: &ImportedResource,
+    mappings: &dtx_core::nix::PackageMappings,
+) -> Option<String> {
+    use dtx_core::nix::extract_executable;
 
     if let Some(pkg) = mappings.get_package(&resource.name) {
         return Some(pkg.clone());
@@ -402,6 +403,7 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         failed: bool,
     }
     let mut details: Vec<ImportDetail> = Vec::new();
+    let mappings = dtx_core::nix::PackageMappings::load();
 
     for resource in &config.resources {
         // Check if service already exists
@@ -414,7 +416,7 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         let nix_package = if no_nix {
             None
         } else {
-            infer_nix_package(resource)
+            infer_nix_package(resource, &mappings)
         };
 
         match resource_config_from_imported(resource, nix_package.clone()) {

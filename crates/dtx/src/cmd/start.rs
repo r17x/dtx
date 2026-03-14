@@ -199,26 +199,17 @@ async fn run_with_native_backend(
     services: &[ModelService],
     params: NativeBackendParams,
 ) -> Result<()> {
-    let NativeBackendParams {
-        project_root,
-        flake_dir,
-        nix_env,
-        foreground,
-        mut pipe,
-        deferred_warnings,
-    } = params;
-    if foreground {
-        run_foreground(
-            out,
-            services,
+    if params.foreground {
+        run_foreground(out, services, params).await
+    } else {
+        let NativeBackendParams {
             project_root,
             flake_dir,
             nix_env,
-            pipe,
+            mut pipe,
             deferred_warnings,
-        )
-        .await
-    } else {
+            ..
+        } = params;
         pipe.done_untimed(3, &format!("{} ready", services.len()));
         pipe.finish();
         let result = crate::tui::run_tui(
@@ -240,12 +231,15 @@ async fn run_with_native_backend(
 async fn run_foreground(
     out: &Output,
     services: &[ModelService],
-    project_root: PathBuf,
-    _flake_dir: PathBuf,
-    nix_env: Option<HashMap<String, String>>,
-    mut pipe: crate::output::Pipeline,
-    deferred_warnings: Vec<String>,
+    params: NativeBackendParams,
 ) -> Result<()> {
+    let NativeBackendParams {
+        project_root,
+        nix_env,
+        mut pipe,
+        deferred_warnings,
+        ..
+    } = params;
     let event_bus = Arc::new(ResourceEventBus::new());
     let mut subscriber = event_bus.subscribe();
 
@@ -392,13 +386,7 @@ async fn build_flake_packages(
             continue;
         }
         // Check if already on PATH
-        let found = path_env
-            .split(':')
-            .filter(|d| !d.is_empty())
-            .any(|dir| {
-                let bin = std::path::Path::new(dir).join(&target);
-                bin.exists() && bin.is_file()
-            });
+        let found = dtx_core::nix::find_on_path(&target, path_env);
         if !found && !to_build.contains(pkg) {
             to_build.push(pkg.clone());
         }

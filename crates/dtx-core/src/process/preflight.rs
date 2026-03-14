@@ -255,15 +255,11 @@ async fn run_single_check_with_path(check_type: &CheckType, nix_path: Option<&st
 
 /// Check if a binary exists in PATH, with optional custom PATH.
 async fn check_binary_exists_with_path(binary: &str, nix_path: Option<&str>) -> bool {
-    // If nix_path provided, check directly in those directories first
-    // (avoids issues with `which` not being in the modified PATH)
+    // Check nix PATH directories directly (avoids `which` not being in modified PATH)
     if let Some(path) = nix_path {
-        for dir in path.split(':') {
-            let bin_path = std::path::Path::new(dir).join(binary);
-            if bin_path.exists() && bin_path.is_file() {
-                tracing::debug!(binary = binary, path = %bin_path.display(), "Found binary in Nix PATH");
-                return true;
-            }
+        if crate::nix::find_on_path(binary, path) {
+            tracing::debug!(binary = binary, "Found binary in Nix PATH");
+            return true;
         }
     }
 

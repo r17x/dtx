@@ -35,10 +35,10 @@ pub use ast::{
 pub use backend::{CliBackend, NixBackend};
 pub use client::NixClient;
 pub use command::{
-    analyze_service_packages, extract_executable, get_services_needing_attention, infer_package,
-    infer_package_detailed, infer_package_with_config, infer_packages_for_services,
-    is_local_binary, is_nix_store_path, sanitize_nix_store_paths, PackageAnalysisResult,
-    PackageInference, ServicePackageAnalysis,
+    analyze_service_packages, extract_executable, find_on_path,
+    get_services_needing_attention, infer_package, infer_package_detailed,
+    infer_package_with_config, infer_packages_for_services, is_local_binary, is_nix_store_path,
+    sanitize_nix_store_paths, PackageAnalysisResult, PackageInference, ServicePackageAnalysis,
 };
 pub use devenv::{dev_env_cache, DevEnvCache, DevEnvironment};
 pub use envrc::EnvrcGenerator;
