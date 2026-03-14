@@ -28,12 +28,15 @@ pub mod native;
 pub mod shell;
 pub mod sync;
 
-pub use ast::FlakeAst;
+pub use ast::{
+    detect_scripts, export_scripts_as_packages, resolve_flake_imports, DetectedScript,
+    ExportResult, FlakeAst, ResolvedNixFile, ScriptContext,
+};
 pub use backend::{CliBackend, NixBackend};
 pub use client::NixClient;
 pub use command::{
-    analyze_service_packages, extract_executable, get_services_needing_attention, infer_package,
-    infer_package_detailed, infer_package_with_config, infer_packages_for_services,
+    analyze_service_packages, extract_executable, find_on_path, get_services_needing_attention,
+    infer_package, infer_package_detailed, infer_package_with_config, infer_packages_for_services,
     is_local_binary, is_nix_store_path, sanitize_nix_store_paths, PackageAnalysisResult,
     PackageInference, ServicePackageAnalysis,
 };

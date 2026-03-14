@@ -388,6 +388,14 @@ pub fn is_nix_store_path(path: &str) -> bool {
     path.starts_with("/nix/store/")
 }
 
+/// Check if a binary exists in any directory on the given PATH string.
+pub fn find_on_path(binary: &str, path_env: &str) -> bool {
+    path_env.split(':').filter(|d| !d.is_empty()).any(|dir| {
+        let bin = std::path::Path::new(dir).join(binary);
+        bin.exists() && bin.is_file()
+    })
+}
+
 /// Rewrites nix store paths in a command to bare executable names
 /// when the executable is found on the provided PATH.
 ///
@@ -401,8 +409,6 @@ pub fn is_nix_store_path(path: &str) -> bool {
 pub fn sanitize_nix_store_paths(command: &str, path_env: &str) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
     let mut result_tokens: Vec<&str> = Vec::new();
-
-    let path_dirs: Vec<&str> = path_env.split(':').collect();
 
     for token in command.split_whitespace() {
         if !is_nix_store_path(token) {
@@ -418,15 +424,7 @@ pub fn sanitize_nix_store_paths(command: &str, path_env: &str) -> (String, Vec<S
             }
         };
 
-        let found_on_path = path_dirs.iter().any(|dir| {
-            if dir.is_empty() {
-                return false;
-            }
-            let candidate = format!("{dir}/{basename}");
-            std::fs::metadata(&candidate).is_ok()
-        });
-
-        if found_on_path {
+        if find_on_path(basename, path_env) {
             result_tokens.push(basename);
         } else {
             warnings.push(format!(

@@ -95,25 +95,48 @@ pub async fn run(
     };
 
     // Step 1: nix environment
-    let nix_env: Option<HashMap<String, String>> = if effective_flake_dir.join("flake.nix").exists()
-    {
-        pipe.animate(1, "loading");
-        match DevEnvironment::from_flake(&effective_flake_dir).await {
-            Ok(env) => {
-                pipe.done(1, &format!("{} vars", env.var_count()));
-                Some(env.env_vars)
+    let mut nix_env: Option<HashMap<String, String>> =
+        if effective_flake_dir.join("flake.nix").exists() {
+            pipe.animate(1, "loading");
+            match DevEnvironment::from_flake(&effective_flake_dir).await {
+                Ok(env) => {
+                    pipe.done(1, &format!("{} vars", env.var_count()));
+                    Some(env.env_vars)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to extract Nix environment: {}", e);
+                    pipe.fail(1, &format!("{}", e));
+                    deferred_warnings.push("Services will use system PATH instead.".into());
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to extract Nix environment: {}", e);
-                pipe.fail(1, &format!("{}", e));
-                deferred_warnings.push("Services will use system PATH instead.".into());
-                None
+        } else {
+            pipe.done_untimed(1, "skipped");
+            None
+        };
+
+    // Step 1b: build custom flake packages not on devShell PATH
+    if let Some(ref mut env) = nix_env {
+        let extra = build_flake_packages(&services, &effective_flake_dir, env).await;
+        if !extra.is_empty() {
+            let names: Vec<&str> = extra.iter().map(|(n, _)| n.as_str()).collect();
+            tracing::info!(
+                "built {} flake package(s): {}",
+                extra.len(),
+                names.join(", ")
+            );
+            let extra_bin: Vec<String> = extra
+                .into_iter()
+                .map(|(_, p)| p.join("bin").to_string_lossy().to_string())
+                .collect();
+            let extra_path = extra_bin.join(":");
+            if let Some(path) = env.get_mut("PATH") {
+                *path = format!("{}:{}", extra_path, path);
+            } else {
+                env.insert("PATH".to_string(), extra_path);
             }
         }
-    } else {
-        pipe.done_untimed(1, "skipped");
-        None
-    };
+    }
 
     // Step 2: pre-flight checks
     let nix_path = nix_env.as_ref().and_then(|env| env.get("PATH").cloned());
@@ -176,26 +199,17 @@ async fn run_with_native_backend(
     services: &[ModelService],
     params: NativeBackendParams,
 ) -> Result<()> {
-    let NativeBackendParams {
-        project_root,
-        flake_dir,
-        nix_env,
-        foreground,
-        mut pipe,
-        deferred_warnings,
-    } = params;
-    if foreground {
-        run_foreground(
-            out,
-            services,
+    if params.foreground {
+        run_foreground(out, services, params).await
+    } else {
+        let NativeBackendParams {
             project_root,
             flake_dir,
             nix_env,
-            pipe,
+            mut pipe,
             deferred_warnings,
-        )
-        .await
-    } else {
+            ..
+        } = params;
         pipe.done_untimed(3, &format!("{} ready", services.len()));
         pipe.finish();
         let result = crate::tui::run_tui(
@@ -217,12 +231,15 @@ async fn run_with_native_backend(
 async fn run_foreground(
     out: &Output,
     services: &[ModelService],
-    project_root: PathBuf,
-    _flake_dir: PathBuf,
-    nix_env: Option<HashMap<String, String>>,
-    mut pipe: crate::output::Pipeline,
-    deferred_warnings: Vec<String>,
+    params: NativeBackendParams,
 ) -> Result<()> {
+    let NativeBackendParams {
+        project_root,
+        nix_env,
+        mut pipe,
+        deferred_warnings,
+        ..
+    } = params;
     let event_bus = Arc::new(ResourceEventBus::new());
     let mut subscriber = event_bus.subscribe();
 
@@ -342,6 +359,82 @@ fn service_to_process_config(service: &ModelService, project_root: &Path) -> Pro
     }
 
     config
+}
+
+/// Build flake packages whose binaries aren't on the current PATH.
+/// Returns (package_name, output_path) for each successfully built package.
+async fn build_flake_packages(
+    services: &[ModelService],
+    flake_dir: &Path,
+    env: &HashMap<String, String>,
+) -> Vec<(String, PathBuf)> {
+    use dtx_core::nix::extract_executable;
+
+    let path_env = env.get("PATH").map(|s| s.as_str()).unwrap_or("");
+
+    // Collect packages whose command binary isn't on PATH
+    let mut to_build: Vec<String> = Vec::new();
+    for svc in services {
+        let Some(ref pkg) = svc.package else {
+            continue;
+        };
+        let Some(target) = extract_executable(&svc.command) else {
+            continue;
+        };
+        // Skip absolute/relative paths — only bare basenames need building
+        if target.contains('/') {
+            continue;
+        }
+        // Check if already on PATH
+        let found = dtx_core::nix::find_on_path(&target, path_env);
+        if !found && !to_build.contains(pkg) {
+            to_build.push(pkg.clone());
+        }
+    }
+
+    // Build all packages concurrently
+    let mut set = tokio::task::JoinSet::new();
+    let flake_dir = flake_dir.to_path_buf();
+    for pkg in to_build {
+        let dir = flake_dir.clone();
+        set.spawn(async move {
+            let result = build_single_flake_package(&dir, &pkg).await;
+            (pkg, result)
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(Ok((pkg, outcome))) = set.join_next().await {
+        match outcome {
+            Ok(path) => results.push((pkg, path)),
+            Err(e) => tracing::debug!("nix build .#{} skipped: {}", pkg, e),
+        }
+    }
+    results
+}
+
+/// Run `nix build .#<package> --print-out-paths --no-link` and return the output path.
+async fn build_single_flake_package(flake_dir: &Path, package: &str) -> Result<PathBuf> {
+    let output = tokio::process::Command::new("nix")
+        .args([
+            "build",
+            &format!(".#{}", package),
+            "--print-out-paths",
+            "--no-link",
+        ])
+        .current_dir(flake_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{}", stderr.trim());
+    }
+
+    let path = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(PathBuf::from(path))
 }
 
 /// Collects warnings about services that have no package and can't be inferred.

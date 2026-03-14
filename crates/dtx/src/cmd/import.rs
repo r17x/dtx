@@ -132,10 +132,11 @@ fn display_import_summary(out: &Output, config: &ImportedConfig) {
 }
 
 /// Infer Nix package from resource.
-fn infer_nix_package(resource: &ImportedResource) -> Option<String> {
-    use dtx_core::nix::{extract_executable, PackageMappings};
-
-    let mappings = PackageMappings::load();
+fn infer_nix_package(
+    resource: &ImportedResource,
+    mappings: &dtx_core::nix::PackageMappings,
+) -> Option<String> {
+    use dtx_core::nix::extract_executable;
 
     if let Some(pkg) = mappings.get_package(&resource.name) {
         return Some(pkg.clone());
@@ -234,11 +235,21 @@ fn resource_config_from_imported(
         ..Default::default()
     });
 
-    // Build nix config
-    let nix = nix_package.map(|pkg| NixConfig {
-        packages: vec![pkg],
-        ..Default::default()
-    });
+    // Build nix config: merge inferred package with custom exported packages
+    let mut all_packages = resource.nix_packages.clone();
+    if let Some(pkg) = nix_package {
+        if !all_packages.contains(&pkg) {
+            all_packages.push(pkg);
+        }
+    }
+    let nix = if all_packages.is_empty() {
+        None
+    } else {
+        Some(NixConfig {
+            packages: all_packages,
+            ..Default::default()
+        })
+    };
 
     Ok(ResourceConfig {
         command: Some(command),
@@ -317,9 +328,6 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         None => detect_format(&file, &content)?,
     };
 
-    out.step("format")
-        .done_untimed(&format!("{:?} (from {})", resolved_format, file.display()));
-
     let importer = get_importer(resolved_format);
     let mut config = importer.import(&content)?;
 
@@ -327,34 +335,79 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
     // so display, store ops, and dependency references all use canonical form.
     normalize_imported_config(&mut config, out);
 
-    // Sanitize nix store paths if nix is available
-    if !no_nix {
+    // === Pipeline: show all steps upfront ===
+    let has_flake = !no_nix && ctx.store.project_root().join("flake.nix").exists();
+    let labels: Vec<&str> = if has_flake {
+        vec!["format", "nix", "import"]
+    } else {
+        vec!["format", "import"]
+    };
+    let mut pipe = out.pipeline(&labels);
+
+    // Step 0: format
+    pipe.done_untimed(
+        0,
+        &format!("{:?} (from {})", resolved_format, file.display()),
+    );
+
+    // Step 1: nix (only if flake exists)
+    if has_flake {
+        pipe.animate(1, "loading devShell");
+
+        // Sanitize nix store paths
         if let Some(path) = get_devshell_path(ctx.store.project_root()).await {
             let count = dtx_core::translation::import::sanitize_nix_commands(&mut config, &path);
+            let mut nix_notes = Vec::new();
             if count > 0 {
-                out.step("nix").done_untimed(&format!(
-                    "sanitized nix store paths in {} command(s)",
-                    count
+                nix_notes.push(format!("{} path(s) sanitized", count));
+            }
+
+            // Export custom nix scripts as packages
+            let project_root = ctx.store.project_root();
+            let (export_count, names) =
+                dtx_core::translation::import::export_custom_scripts(&mut config, project_root);
+            if export_count > 0 {
+                nix_notes.push(format!(
+                    "{} script(s) exported: {}",
+                    export_count,
+                    names.join(", ")
                 ));
             }
+
+            if nix_notes.is_empty() {
+                pipe.done(1, "no store paths");
+            } else {
+                pipe.done(1, &nix_notes.join(", "));
+            }
+        } else {
+            pipe.done(1, "no devShell");
         }
     }
 
+    let import_step = if has_flake { 2 } else { 1 };
+
     if dry_run {
+        pipe.done_untimed(import_step, "dry run");
+        pipe.finish();
         display_import_summary(out, &config);
-        out.step("import").done_untimed("dry run, no changes");
         return Ok(());
     }
 
-    let mut group = out.group("import");
+    pipe.animate(import_step, "creating");
 
     let mut created_count = 0;
     let mut skipped_count = 0;
+    struct ImportDetail {
+        name: String,
+        note: String,
+        failed: bool,
+    }
+    let mut details: Vec<ImportDetail> = Vec::new();
+    let mappings = dtx_core::nix::PackageMappings::load();
 
     for resource in &config.resources {
         // Check if service already exists
         if ctx.store.get_resource(&resource.name).is_some() {
-            group.child_done(&resource.name, "skipped (exists)");
             skipped_count += 1;
             continue;
         }
@@ -363,7 +416,7 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
         let nix_package = if no_nix {
             None
         } else {
-            infer_nix_package(resource)
+            infer_nix_package(resource, &mappings)
         };
 
         match resource_config_from_imported(resource, nix_package.clone()) {
@@ -388,11 +441,19 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
                     "added".to_string()
                 };
 
-                group.child_done(&resource.name, &flake_note);
+                details.push(ImportDetail {
+                    name: resource.name.clone(),
+                    note: flake_note,
+                    failed: false,
+                });
                 created_count += 1;
             }
             Err(e) => {
-                group.child_fail(&resource.name, &format!("{}", e));
+                details.push(ImportDetail {
+                    name: resource.name.clone(),
+                    note: format!("{}", e),
+                    failed: true,
+                });
             }
         }
     }
@@ -400,10 +461,20 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
     // Save all at once
     ctx.store.save().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    group.done_with_summary(&format!(
-        "{} created, {} skipped",
-        created_count, skipped_count
-    ));
+    pipe.done(
+        import_step,
+        &format!("{} created, {} skipped", created_count, skipped_count),
+    );
+    pipe.finish();
+
+    // Show per-resource details below the pipeline
+    for d in &details {
+        if d.failed {
+            out.step_child(&d.name).fail_untimed(&d.note);
+        } else {
+            out.step_child(&d.name).done_untimed(&d.note);
+        }
+    }
 
     // Notify web/TUI of config change (fire-and-forget, sync)
     dtx_core::notify_config_changed_sync();
