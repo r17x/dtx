@@ -374,6 +374,126 @@ pub fn dtx_code_tools() -> Vec<Tool> {
             }),
         )
         .with_description("Insert code after a symbol"),
+        Tool::new(
+            "insert_at_line",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Line number to insert at (1-indexed)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to insert"
+                    }
+                },
+                "required": ["path", "line", "content"]
+            }),
+        )
+        .with_description("Insert content at a specific line number"),
+        Tool::new(
+            "replace_lines",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Start line (1-indexed, inclusive)"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "End line (1-indexed, inclusive)"
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "Replacement content"
+                    }
+                },
+                "required": ["path", "start_line", "end_line", "new_content"]
+            }),
+        )
+        .with_description("Replace a range of lines with new content"),
+        Tool::new(
+            "rename_symbol",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path containing the symbol definition"
+                    },
+                    "name_path": {
+                        "type": "string",
+                        "description": "Symbol name path (e.g. 'MyStruct/my_method')"
+                    },
+                    "new_name": {
+                        "type": "string",
+                        "description": "New name for the symbol"
+                    }
+                },
+                "required": ["path", "name_path", "new_name"]
+            }),
+        )
+        .with_description("Rename a symbol across all files"),
+        Tool::new(
+            "find_referencing_symbols",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Symbol name to find references for"
+                    },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Restrict search to this directory"
+                    }
+                },
+                "required": ["symbol_name"]
+            }),
+        )
+        .with_description("Find all references with containing symbol context"),
+        Tool::new(
+            "find_file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. '*.rs', '**/test_*')"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        )
+        .with_description("Find files matching a glob pattern"),
+        Tool::new(
+            "list_dir",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path (default: workspace root)"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "List recursively (default: false)",
+                        "default": false
+                    }
+                }
+            }),
+        )
+        .with_description("List directory contents"),
     ]
 }
 
@@ -484,7 +604,100 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
     ]
 }
 
-/// Get all dtx tools (resource + code + memory).
+/// Get onboarding tools (3) — requires both code and memory features.
+#[cfg(all(feature = "code", feature = "memory"))]
+pub fn dtx_onboarding_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "onboarding",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "save_to_memory": {
+                        "type": "boolean",
+                        "description": "Save onboarding results to memory store (default: true)",
+                        "default": true
+                    }
+                }
+            }),
+        )
+        .with_description("Discover project structure, languages, frameworks, and entry points"),
+        Tool::new(
+            "check_onboarding_performed",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )
+        .with_description("Check if project onboarding has been performed"),
+        Tool::new(
+            "initial_instructions",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )
+        .with_description("Get dtx MCP usage instructions and tool descriptions"),
+    ]
+}
+
+/// Get meta-cognitive thinking tools (3).
+pub fn dtx_meta_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "think_about_collected_information",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "thoughts": {
+                        "type": "string",
+                        "description": "Your collected information and current thinking about the problem"
+                    }
+                },
+                "required": ["thoughts"]
+            }),
+        )
+        .with_description("Structure analysis of collected information using Context Excavation + Constraint Mapping"),
+        Tool::new(
+            "think_about_task_adherence",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task you are working on"
+                    },
+                    "thoughts": {
+                        "type": "string",
+                        "description": "Your current approach and decisions so far"
+                    }
+                },
+                "required": ["task", "thoughts"]
+            }),
+        )
+        .with_description("Validate approach against task using Why Ladder + Anti-Pattern Check"),
+        Tool::new(
+            "think_about_whether_you_are_done",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task you are working on"
+                    },
+                    "thoughts": {
+                        "type": "string",
+                        "description": "Your assessment of completion status"
+                    }
+                },
+                "required": ["task", "thoughts"]
+            }),
+        )
+        .with_description("Validate completion using Synthesis Validation + The Ultimate Test"),
+    ]
+}
+
+/// Get all dtx tools (resource + code + memory + onboarding + meta).
 #[allow(unused_mut)]
 pub fn dtx_tools() -> Vec<Tool> {
     let mut tools = dtx_resource_tools();
@@ -494,6 +707,11 @@ pub fn dtx_tools() -> Vec<Tool> {
 
     #[cfg(feature = "memory")]
     tools.extend(dtx_memory_tools());
+
+    #[cfg(all(feature = "code", feature = "memory"))]
+    tools.extend(dtx_onboarding_tools());
+
+    tools.extend(dtx_meta_tools());
 
     tools
 }

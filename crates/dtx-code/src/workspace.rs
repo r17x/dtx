@@ -15,6 +15,39 @@ fn walk_source_files(root: &Path) -> impl Iterator<Item = DirEntry> {
         .filter(|e| crate::language::detect(e.path()).is_some())
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    File,
+    Dir,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub entry_type: EntryKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+impl DirEntryInfo {
+    fn from_metadata(name: String, metadata: &std::fs::Metadata) -> Self {
+        Self {
+            name,
+            entry_type: if metadata.is_dir() {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            },
+            size: if metadata.is_file() {
+                Some(metadata.len())
+            } else {
+                None
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SymbolMatch {
     pub file: PathBuf,
@@ -134,12 +167,20 @@ impl WorkspaceIndex {
         } else {
             for entry in walk_source_files(&self.root) {
                 let file_path = entry.path().to_path_buf();
-                let src = match std::fs::read_to_string(&file_path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+                // get_or_parse reads the file internally; only read again for body extraction
                 let idx = match self.get_or_parse(&file_path) {
                     Ok(idx) => idx,
+                    Err(_) => continue,
+                };
+                // Quick check: skip file if no symbols match pattern (avoids re-read)
+                let has_match = idx.symbols.iter().any(|s| {
+                    s.name_path.contains(name_path_pattern) || s.name.contains(name_path_pattern)
+                });
+                if !has_match {
+                    continue;
+                }
+                let src = match std::fs::read_to_string(&file_path) {
+                    Ok(s) => s,
                     Err(_) => continue,
                 };
                 collect_matching_symbols(
@@ -155,6 +196,72 @@ impl WorkspaceIndex {
         }
 
         Ok(results)
+    }
+
+    /// Find files matching a glob pattern (e.g., "*.rs", "**/test_*").
+    /// Returns relative paths sorted alphabetically.
+    pub fn find_files(&self, glob_pattern: &str) -> Result<Vec<PathBuf>> {
+        use ignore::overrides::OverrideBuilder;
+
+        let mut builder = OverrideBuilder::new(&self.root);
+        builder
+            .add(glob_pattern)
+            .map_err(|e| CodeError::Parse(format!("Invalid glob pattern: {e}")))?;
+        let overrides = builder
+            .build()
+            .map_err(|e| CodeError::Parse(format!("Invalid glob pattern: {e}")))?;
+
+        let walker = WalkBuilder::new(&self.root).overrides(overrides).build();
+
+        let mut files: Vec<PathBuf> = walker
+            .flatten()
+            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(&self.root)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            .collect();
+
+        files.sort();
+        Ok(files)
+    }
+
+    /// List directory contents.
+    pub fn list_dir(&self, path: &Path, recursive: bool) -> Result<Vec<DirEntryInfo>> {
+        let abs = self.resolve_path(path);
+
+        let mut entries = Vec::new();
+        if recursive {
+            // Use WalkBuilder to respect .gitignore
+            for entry in WalkBuilder::new(&abs).build().flatten() {
+                if entry.path() == abs {
+                    continue;
+                }
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let name = entry
+                    .path()
+                    .strip_prefix(&self.root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .to_string();
+                entries.push(DirEntryInfo::from_metadata(name, &metadata));
+            }
+        } else {
+            let read_dir = std::fs::read_dir(&abs)
+                .map_err(|_| CodeError::FileNotFound(abs.display().to_string()))?;
+            for entry in read_dir.flatten() {
+                let metadata = entry.metadata()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                entries.push(DirEntryInfo::from_metadata(name, &metadata));
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 
     pub fn get_overview(&self, path: &Path, depth: Option<usize>) -> Result<SymbolOverview> {
@@ -378,10 +485,182 @@ def standalone_fn():
     }
 
     #[test]
+    fn rename_symbol_single_file() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let result =
+            crate::rename::rename_symbol(&ws, &path, "standalone", "helper").expect("rename");
+        assert_eq!(result.old_name, "standalone");
+        assert_eq!(result.new_name, "helper");
+        assert!(result.occurrences_replaced >= 1);
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.contains("fn helper()"));
+        assert!(!content.contains("fn standalone()"));
+    }
+
+    #[test]
+    fn rename_symbol_not_found() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let result = crate::rename::rename_symbol(&ws, &path, "nonexistent", "new_name");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn find_references_across_files() {
         let (_dir, root) = create_test_workspace();
         // "self" appears in both Rust and Python files
         let refs = crate::references::find_references(&root, "self", None).expect("refs");
         assert!(!refs.is_empty());
+    }
+
+    #[test]
+    fn insert_at_line_beginning() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        crate::edit::insert_at_line(&ws, &path, 1, "// header\n").expect("insert");
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.starts_with("// header\n"));
+    }
+
+    #[test]
+    fn insert_at_line_middle() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let original = std::fs::read_to_string(&path).expect("read");
+        let original_lines: Vec<&str> = original.lines().collect();
+        crate::edit::insert_at_line(&ws, &path, 3, "// inserted\n").expect("insert");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines[2], "// inserted");
+        assert_eq!(lines.len(), original_lines.len() + 1);
+    }
+
+    #[test]
+    fn insert_at_line_end() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let original = std::fs::read_to_string(&path).expect("read");
+        let line_count = original.lines().count();
+        crate::edit::insert_at_line(&ws, &path, line_count + 1, "// footer\n").expect("insert");
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert!(content.contains("// footer"));
+    }
+
+    #[test]
+    fn insert_at_line_invalid() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let original = std::fs::read_to_string(&path).expect("read");
+        let line_count = original.lines().count();
+        let result = crate::edit::insert_at_line(&ws, &path, line_count + 100, "nope\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replace_lines_single() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        crate::edit::replace_lines(&ws, &path, 2, 2, "// replaced\n").expect("replace");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines[1], "// replaced");
+    }
+
+    #[test]
+    fn replace_lines_range() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let original = std::fs::read_to_string(&path).expect("read");
+        let original_line_count = original.lines().count();
+        crate::edit::replace_lines(&ws, &path, 2, 4, "// single replacement\n").expect("replace");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let new_line_count = content.lines().count();
+        // Replaced 3 lines with 1 line
+        assert!(new_line_count < original_line_count);
+        assert!(content.contains("// single replacement"));
+    }
+
+    #[test]
+    fn replace_lines_invalid_range() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let path = root.join("lib.rs");
+        let result = crate::edit::replace_lines(&ws, &path, 5, 3, "nope\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_referencing_symbols_enriches_context() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        // "self" appears inside methods - should report containing symbol
+        let refs = crate::references::find_referencing_symbols(&ws, "self", None).expect("refs");
+        assert!(!refs.is_empty());
+        // At least some references should have containing_symbol set
+        let enriched: Vec<_> = refs
+            .iter()
+            .filter(|r| r.containing_symbol.is_some())
+            .collect();
+        assert!(
+            !enriched.is_empty(),
+            "should find containing symbols for at least some refs"
+        );
+    }
+
+    #[test]
+    fn find_files_glob() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root);
+        let rs_files = ws.find_files("*.rs").expect("glob");
+        assert!(!rs_files.is_empty());
+        assert!(rs_files
+            .iter()
+            .all(|f| f.extension().is_some_and(|e| e == "rs")));
+
+        let py_files = ws.find_files("**/*.py").expect("glob");
+        assert!(!py_files.is_empty());
+    }
+
+    #[test]
+    fn find_files_no_match() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root);
+        let files = ws.find_files("*.xyz").expect("glob");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn list_dir_non_recursive() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let entries = ws.list_dir(&root, false).expect("list");
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"lib.rs"));
+        assert!(names.contains(&"sub"));
+    }
+
+    #[test]
+    fn list_dir_recursive() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let entries = ws.list_dir(&root, true).expect("list");
+        assert!(entries.iter().any(|e| e.name.contains("main.py")));
+    }
+
+    #[test]
+    fn list_dir_not_found() {
+        let (_dir, root) = create_test_workspace();
+        let ws = WorkspaceIndex::new(root.clone());
+        let result = ws.list_dir(&root.join("nonexistent"), false);
+        assert!(result.is_err());
     }
 }

@@ -7,6 +7,50 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+/// Arg extraction helpers — reduce boilerplate when parsing MCP tool arguments.
+/// LLMs frequently send booleans as strings, so `arg_bool` handles both.
+mod args {
+    use crate::jsonrpc::ErrorObject;
+
+    pub fn require(v: &Option<serde_json::Value>) -> Result<&serde_json::Value, ErrorObject> {
+        v.as_ref()
+            .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))
+    }
+
+    pub fn require_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, ErrorObject> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ErrorObject::invalid_params(format!("Missing {key}")))
+    }
+
+    pub fn optional_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        args.get(key).and_then(|v| v.as_str())
+    }
+
+    pub fn optional_usize(args: &serde_json::Value, key: &str) -> Option<usize> {
+        args.get(key).and_then(|v| v.as_u64()).map(|n| n as usize)
+    }
+
+    pub fn require_usize(args: &serde_json::Value, key: &str) -> Result<usize, ErrorObject> {
+        args.get(key)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .ok_or_else(|| ErrorObject::invalid_params(format!("Missing {key}")))
+    }
+
+    pub fn optional_bool(args: &serde_json::Value, key: &str, default: bool) -> bool {
+        args.get(key)
+            .and_then(|v| {
+                v.as_bool().or_else(|| match v.as_str() {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                })
+            })
+            .unwrap_or(default)
+    }
+}
+
 use crate::handler::ProtocolHandler;
 use crate::jsonrpc::ErrorObject;
 use crate::methods::{LogsParams, ResourceParams};
@@ -370,10 +414,16 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
             "get_symbols_overview"
             | "find_symbol"
             | "find_references"
+            | "find_referencing_symbols"
             | "search_pattern"
             | "replace_symbol_body"
             | "insert_before_symbol"
-            | "insert_after_symbol" => {
+            | "insert_after_symbol"
+            | "insert_at_line"
+            | "replace_lines"
+            | "rename_symbol"
+            | "find_file"
+            | "list_dir" => {
                 let code = self.require_code()?;
                 handle_code_tool(code, &params.name, &params.arguments)
             }
@@ -385,6 +435,21 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
                 handle_memory_tool(mem, &params.name, &params.arguments)
             }
 
+            // Onboarding tools (require both code + memory)
+            #[cfg(all(feature = "code", feature = "memory"))]
+            "onboarding" | "check_onboarding_performed" | "initial_instructions" => {
+                let code = self.require_code()?;
+                let mem = self.require_memory()?;
+                handle_onboarding_tool(code, mem, &params.name, &params.arguments)
+            }
+
+            // Meta-cognitive tools
+            "think_about_collected_information"
+            | "think_about_task_adherence"
+            | "think_about_whether_you_are_done" => {
+                handle_meta_tool(&params.name, &params.arguments)
+            }
+
             _ => Err(ErrorObject::method_not_found(&params.name)),
         }
     }
@@ -394,126 +459,114 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
 fn handle_code_tool(
     code: &Arc<dtx_code::WorkspaceIndex>,
     name: &str,
-    args: &Option<serde_json::Value>,
+    raw_args: &Option<serde_json::Value>,
 ) -> Result<CallToolResult, ErrorObject> {
-    let args = args
-        .as_ref()
-        .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))?;
+    use std::path::Path;
+
+    let a = args::require(raw_args)?;
+    let err = |e: dtx_code::CodeError| ErrorObject::internal_error(e.to_string());
 
     match name {
         "get_symbols_overview" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing path"))?;
-            let depth = args
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .map(|d| d as usize);
-            let overview = code
-                .get_overview(std::path::Path::new(path), depth)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let path = args::require_str(a, "path")?;
+            let depth = args::optional_usize(a, "depth");
+            let overview = code.get_overview(Path::new(path), depth).map_err(err)?;
             Ok(CallToolResult::json(&overview))
         }
         "find_symbol" => {
-            let pattern = args
-                .get("name_path_pattern")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name_path_pattern"))?;
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .map(std::path::Path::new);
-            let depth = args
-                .get("depth")
-                .and_then(|v| v.as_u64())
-                .map(|d| d as usize);
-            let include_body = args
-                .get("include_body")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let pattern = args::require_str(a, "name_path_pattern")?;
+            let path = args::optional_str(a, "path").map(Path::new);
+            let depth = args::optional_usize(a, "depth");
+            let include_body = args::optional_bool(a, "include_body", false);
             let matches = code
                 .find_symbol(pattern, path, depth, include_body, None)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+                .map_err(err)?;
             Ok(CallToolResult::json(&matches))
         }
         "find_references" => {
-            let symbol_name = args
-                .get("symbol_name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing symbol_name"))?;
-            let scope = args
-                .get("scope_path")
-                .and_then(|v| v.as_str())
-                .map(std::path::Path::new);
-            let refs = dtx_code::find_references(code.root(), symbol_name, scope)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let symbol_name = args::require_str(a, "symbol_name")?;
+            let scope = args::optional_str(a, "scope_path").map(Path::new);
+            let refs = dtx_code::find_references(code.root(), symbol_name, scope).map_err(err)?;
+            Ok(CallToolResult::json(&refs))
+        }
+        "find_referencing_symbols" => {
+            let symbol_name = args::require_str(a, "symbol_name")?;
+            let scope = args::optional_str(a, "scope_path").map(Path::new);
+            let refs = dtx_code::find_referencing_symbols(code, symbol_name, scope).map_err(err)?;
             Ok(CallToolResult::json(&refs))
         }
         "search_pattern" => {
-            let pattern = args
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing pattern"))?;
-            let glob = args.get("glob").and_then(|v| v.as_str());
-            let context = args
-                .get("context_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2) as usize;
-            let matches = dtx_code::search_pattern(code.root(), pattern, glob, context)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let pattern = args::require_str(a, "pattern")?;
+            let glob = args::optional_str(a, "glob");
+            let context = args::optional_usize(a, "context_lines").unwrap_or(2);
+            let matches =
+                dtx_code::search_pattern(code.root(), pattern, glob, context).map_err(err)?;
             Ok(CallToolResult::json(&matches))
         }
         "replace_symbol_body" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing path"))?;
-            let name_path = args
-                .get("name_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name_path"))?;
-            let new_body = args
-                .get("new_body")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing new_body"))?;
-            dtx_code::replace_symbol_body(code, std::path::Path::new(path), name_path, new_body)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let path = args::require_str(a, "path")?;
+            let name_path = args::require_str(a, "name_path")?;
+            let new_body = args::require_str(a, "new_body")?;
+            dtx_code::replace_symbol_body(code, Path::new(path), name_path, new_body)
+                .map_err(err)?;
             Ok(CallToolResult::text("Symbol body replaced"))
         }
         "insert_before_symbol" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing path"))?;
-            let name_path = args
-                .get("name_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name_path"))?;
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing content"))?;
-            dtx_code::insert_before_symbol(code, std::path::Path::new(path), name_path, content)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let path = args::require_str(a, "path")?;
+            let name_path = args::require_str(a, "name_path")?;
+            let content = args::require_str(a, "content")?;
+            dtx_code::insert_before_symbol(code, Path::new(path), name_path, content)
+                .map_err(err)?;
             Ok(CallToolResult::text("Content inserted before symbol"))
         }
         "insert_after_symbol" => {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing path"))?;
-            let name_path = args
-                .get("name_path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name_path"))?;
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing content"))?;
-            dtx_code::insert_after_symbol(code, std::path::Path::new(path), name_path, content)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let path = args::require_str(a, "path")?;
+            let name_path = args::require_str(a, "name_path")?;
+            let content = args::require_str(a, "content")?;
+            dtx_code::insert_after_symbol(code, Path::new(path), name_path, content)
+                .map_err(err)?;
             Ok(CallToolResult::text("Content inserted after symbol"))
+        }
+        "insert_at_line" => {
+            let path = args::require_str(a, "path")?;
+            let line = args::require_usize(a, "line")?;
+            let content = args::require_str(a, "content")?;
+            dtx_code::insert_at_line(code, Path::new(path), line, content).map_err(err)?;
+            Ok(CallToolResult::text(format!(
+                "Content inserted at line {line}"
+            )))
+        }
+        "replace_lines" => {
+            let path = args::require_str(a, "path")?;
+            let start_line = args::require_usize(a, "start_line")?;
+            let end_line = args::require_usize(a, "end_line")?;
+            let new_content = args::require_str(a, "new_content")?;
+            dtx_code::replace_lines(code, Path::new(path), start_line, end_line, new_content)
+                .map_err(err)?;
+            Ok(CallToolResult::text(format!(
+                "Lines {start_line}-{end_line} replaced"
+            )))
+        }
+        "rename_symbol" => {
+            let path = args::require_str(a, "path")?;
+            let name_path = args::require_str(a, "name_path")?;
+            let new_name = args::require_str(a, "new_name")?;
+            let result =
+                dtx_code::rename_symbol(code, Path::new(path), name_path, new_name).map_err(err)?;
+            Ok(CallToolResult::json(&result))
+        }
+        "find_file" => {
+            let pattern = args::require_str(a, "pattern")?;
+            let files = code.find_files(pattern).map_err(err)?;
+            Ok(CallToolResult::json(&files))
+        }
+        "list_dir" => {
+            let path = args::optional_str(a, "path")
+                .map(Path::new)
+                .unwrap_or_else(|| code.root());
+            let recursive = args::optional_bool(a, "recursive", false);
+            let entries = code.list_dir(path, recursive).map_err(err)?;
+            Ok(CallToolResult::json(&entries))
         }
         _ => Err(ErrorObject::method_not_found(name)),
     }
@@ -543,40 +596,22 @@ fn handle_memory_tool(
             Ok(CallToolResult::json(&metas))
         }
         "read_memory" => {
-            let args = args
-                .as_ref()
-                .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))?;
-            let mem_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name"))?;
+            let a = args::require(args)?;
+            let mem_name = args::require_str(a, "name")?;
             let memory = store
                 .read(mem_name)
                 .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
             Ok(CallToolResult::text(memory.to_file_content()))
         }
         "write_memory" => {
-            let args = args
-                .as_ref()
-                .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))?;
-            let mem_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name"))?;
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing content"))?;
-            let kind: dtx_memory::MemoryKind = args
-                .get("kind")
-                .and_then(|v| v.as_str())
+            let a = args::require(args)?;
+            let mem_name = args::require_str(a, "name")?;
+            let content = args::require_str(a, "content")?;
+            let kind: dtx_memory::MemoryKind = args::optional_str(a, "kind")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(dtx_memory::MemoryKind::Project);
-            let description = args
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let tags: Vec<String> = args
+            let description = args::optional_str(a, "description").map(String::from);
+            let tags: Vec<String> = a
                 .get("tags")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -604,25 +639,20 @@ fn handle_memory_tool(
             Ok(CallToolResult::text(format!("Memory '{mem_name}' written")))
         }
         "edit_memory" => {
-            let args = args
-                .as_ref()
-                .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))?;
-            let mem_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name"))?;
+            let a = args::require(args)?;
+            let mem_name = args::require_str(a, "name")?;
 
             let mut memory = store
                 .read(mem_name)
                 .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
 
-            if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+            if let Some(content) = args::optional_str(a, "content") {
                 memory.content = content.to_string();
             }
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+            if let Some(desc) = args::optional_str(a, "description") {
                 memory.meta.description = Some(desc.to_string());
             }
-            if let Some(tags) = args.get("tags").and_then(|v| v.as_array()) {
+            if let Some(tags) = a.get("tags").and_then(|v| v.as_array()) {
                 memory.meta.tags = tags
                     .iter()
                     .filter_map(|v| v.as_str().map(String::from))
@@ -636,17 +666,312 @@ fn handle_memory_tool(
             Ok(CallToolResult::text(format!("Memory '{mem_name}' updated")))
         }
         "delete_memory" => {
-            let args = args
-                .as_ref()
-                .ok_or_else(|| ErrorObject::invalid_params("Missing arguments"))?;
-            let mem_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ErrorObject::invalid_params("Missing name"))?;
+            let a = args::require(args)?;
+            let mem_name = args::require_str(a, "name")?;
             store
                 .delete(mem_name)
                 .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
             Ok(CallToolResult::text(format!("Memory '{mem_name}' deleted")))
+        }
+        _ => Err(ErrorObject::method_not_found(name)),
+    }
+}
+
+#[cfg(all(feature = "code", feature = "memory"))]
+fn handle_onboarding_tool(
+    code: &Arc<dtx_code::WorkspaceIndex>,
+    memory: &Arc<dtx_memory::MemoryStore>,
+    name: &str,
+    args: &Option<serde_json::Value>,
+) -> Result<CallToolResult, ErrorObject> {
+    match name {
+        "onboarding" => {
+            let save = args
+                .as_ref()
+                .map(|a| args::optional_bool(a, "save_to_memory", true))
+                .unwrap_or(true);
+
+            // Discover project structure
+            let files = code.list_files();
+            let file_count = files.len();
+
+            // Count languages by extension
+            let mut lang_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for f in &files {
+                if let Some(ext) = f.extension().and_then(|e| e.to_str()) {
+                    *lang_counts.entry(ext.to_string()).or_default() += 1;
+                }
+            }
+            let mut languages: Vec<_> = lang_counts.into_iter().collect();
+            languages.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Detect build systems and frameworks
+            let well_known = [
+                "Cargo.toml",
+                "package.json",
+                "flake.nix",
+                "Makefile",
+                "CMakeLists.txt",
+                "go.mod",
+                "pyproject.toml",
+                "build.gradle",
+                "pom.xml",
+                "Gemfile",
+                "mix.exs",
+                "stack.yaml",
+            ];
+            let key_files: Vec<String> = well_known
+                .iter()
+                .filter(|f| code.resolve_path(std::path::Path::new(f)).exists())
+                .map(|f| f.to_string())
+                .collect();
+
+            // Detect entry points
+            let entry_candidates = [
+                "src/main.rs",
+                "src/lib.rs",
+                "src/index.ts",
+                "src/index.js",
+                "main.py",
+                "main.go",
+                "app.py",
+                "index.js",
+                "index.ts",
+            ];
+            let entry_points: Vec<String> = entry_candidates
+                .iter()
+                .filter(|f| code.resolve_path(std::path::Path::new(f)).exists())
+                .map(|f| f.to_string())
+                .collect();
+
+            // Build summary
+            let summary = serde_json::json!({
+                "file_count": file_count,
+                "languages": languages.iter().map(|(ext, count)| {
+                    serde_json::json!({"extension": ext, "count": count})
+                }).collect::<Vec<_>>(),
+                "key_files": key_files,
+                "entry_points": entry_points,
+            });
+
+            // Optionally save to memory
+            if save {
+                let now = chrono::Utc::now();
+                let mem = dtx_memory::Memory {
+                    meta: dtx_memory::MemoryMeta {
+                        name: "onboarding".to_string(),
+                        kind: dtx_memory::MemoryKind::Project,
+                        description: Some("Project onboarding summary".to_string()),
+                        created_at: now,
+                        updated_at: now,
+                        tags: vec!["onboarding".to_string()],
+                    },
+                    content: serde_json::to_string_pretty(&summary).unwrap_or_default(),
+                };
+                memory
+                    .write(&mem)
+                    .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            }
+
+            Ok(CallToolResult::json(&summary))
+        }
+        "check_onboarding_performed" => {
+            let metas = memory
+                .list()
+                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let onboarding = metas
+                .iter()
+                .find(|m| m.name == "onboarding" || m.tags.contains(&"onboarding".to_string()));
+            match onboarding {
+                Some(m) => Ok(CallToolResult::json(serde_json::json!({
+                    "performed": true,
+                    "memory_name": m.name,
+                }))),
+                None => Ok(CallToolResult::json(serde_json::json!({
+                    "performed": false,
+                }))),
+            }
+        }
+        "initial_instructions" => {
+            let instructions = r#"# dtx MCP Tool Guide
+
+## Tool Categories
+
+### Resource Management (8 tools)
+- `start_resource`, `stop_resource`, `restart_resource` — Lifecycle control by ID
+- `get_status` — Get resource status
+- `list_resources` — List all managed resources
+- `get_logs` — Get resource logs (default: 50 lines)
+- `start_all`, `stop_all` — Batch operations
+
+### Code Intelligence (7+ tools)
+- `get_symbols_overview` — Get symbol tree for a file (use `depth` to limit)
+- `find_symbol` — Search by name_path pattern (substring match), optionally include body
+- `find_references` / `find_referencing_symbols` — Find all references with containing symbol context
+- `search_pattern` — Regex search across files with glob filtering
+- `rename_symbol` — Cross-file rename with all references updated
+- `replace_symbol_body` — Replace entire symbol definition
+- `insert_before_symbol` / `insert_after_symbol` — Insert code adjacent to symbols
+- `insert_at_line` — Insert content at a specific line number
+- `replace_lines` — Replace a range of lines
+
+### Navigation (2 tools)
+- `find_file` — Glob pattern file search (e.g., "**/*.rs", "**/test_*")
+- `list_dir` — List directory contents (optionally recursive)
+
+### Memory (5 tools)
+- `list_memories` — List all memories (optional kind filter)
+- `read_memory` — Read memory by name
+- `write_memory` — Create/update memory with kind, description, tags
+- `edit_memory` — Edit memory metadata or content
+- `delete_memory` — Delete a memory
+
+### Onboarding (3 tools)
+- `onboarding` — Auto-discover project structure and save to memory
+- `check_onboarding_performed` — Check if onboarding has been done
+- `initial_instructions` — This help text
+
+### Meta-Cognitive (3 tools)
+- `think_about_collected_information` — Structure analysis of gathered context
+- `think_about_task_adherence` — Validate approach against task requirements
+- `think_about_whether_you_are_done` — Completion validation checklist
+
+## Recommended Workflow
+
+1. Run `onboarding` first to discover project structure
+2. Use `find_symbol` and `get_symbols_overview` to explore code (prefer over reading full files)
+3. Use `find_references` / `find_referencing_symbols` to understand dependencies
+4. Use symbol-level editing tools for precise modifications
+5. Use `think_about_*` tools for structured reasoning on complex tasks
+6. Save important context to memory for future sessions
+"#;
+            Ok(CallToolResult::text(instructions))
+        }
+        _ => Err(ErrorObject::method_not_found(name)),
+    }
+}
+
+fn handle_meta_tool(
+    name: &str,
+    raw_args: &Option<serde_json::Value>,
+) -> Result<CallToolResult, ErrorObject> {
+    let a = args::require(raw_args)?;
+
+    match name {
+        "think_about_collected_information" => {
+            let thoughts = args::require_str(a, "thoughts")?;
+
+            let prompt = format!(
+                r#"THE QUESTION CASCADE (applied to your collected information):
+
+Your information:
+{thoughts}
+
+---
+
+Phase 1: CONTEXT EXCAVATION
+- Why does this problem exist? (not what was asked, but why it was asked)
+- What created the conditions for this problem?
+- What happens if we don't solve it?
+- What has been tried before? What failed?
+
+Phase 2: CONSTRAINT MAPPING
+- HARD CONSTRAINTS (cannot violate): [identify from your information]
+- SOFT CONSTRAINTS (prefer not to violate): [identify from your information]
+- What CAN'T we do? (constraints define the solution space)
+
+Phase 3: FIVE LAYERS CHECK
+- Layer 5 (Ecosystem): What external forces/patterns are relevant?
+- Layer 4 (Organization): What team/project constraints exist?
+- Layer 3 (User/Stakeholder): Who uses this and what do they REALLY need?
+- Layer 2 (System): What are the components and how do they interact?
+- Layer 1 (Implementation): What exactly needs to be built/changed?
+
+GAPS: What information is missing at each layer?
+If you can't answer a layer → that's your next research target."#
+            );
+
+            Ok(CallToolResult::text(prompt))
+        }
+        "think_about_task_adherence" => {
+            let task = args::require_str(a, "task")?;
+            let thoughts = args::require_str(a, "thoughts")?;
+
+            let prompt = format!(
+                r#"THE WHY LADDER (trace every decision):
+
+Your task: {task}
+Your current state: {thoughts}
+
+---
+
+For each decision you've made so far:
+├─ Can you trace it UP to the task goal? (Why does this help?)
+├─ Can you trace it DOWN to implementation? (How does this work?)
+└─ If either trace breaks → the decision is ungrounded. Reconsider.
+
+ANTI-PATTERN CHECK (define failures before successes):
+- What could go WRONG with your current approach?
+- Which failures are catastrophic vs recoverable?
+- Are you solving the STATED problem or the REAL problem?
+
+CONSTRAINT VIOLATION CHECK:
+- Are you violating any hard constraints?
+- Are you drifting from scope? (doing more than asked)
+- Are you making assumptions that should be questions?
+
+STATE MACHINE CHECK:
+- What state are you in? (exploring | planning | implementing | verifying)
+- What's the exit condition for this state?
+- What failure conditions exist in this state?
+- What's the recovery path if you're stuck?"#
+            );
+
+            Ok(CallToolResult::text(prompt))
+        }
+        "think_about_whether_you_are_done" => {
+            let task = args::require_str(a, "task")?;
+            let thoughts = args::require_str(a, "thoughts")?;
+
+            let prompt = format!(
+                r#"THE SYNTHESIS VALIDATION:
+
+Your task: {task}
+Your assessment: {thoughts}
+
+---
+
+COHERENCE CHECK (every decision traces):
+For each change you made:
+├─ Can you trace UP to the task goal? (Why Ladder)
+├─ Can you trace DOWN to implementation? (How Path)
+└─ Does it conflict with any other change?
+If any answer is NO → you're not done.
+
+FAILURE MODE ANALYSIS:
+- List 5+ ways your solution could fail
+- Which failures are catastrophic vs recoverable?
+- Did you prevent the catastrophic ones?
+
+THE ULTIMATE TEST:
+Can someone who has never seen your work:
+├─ Read your changes
+├─ Understand WHY every decision was made
+├─ Know what NOT to do (failure modes you considered)
+└─ Verify the solution is correct?
+If NO → what's missing? Add it.
+
+COMPLETION CHECKLIST:
+[ ] All requirements from the task are met
+[ ] No scope drift (nothing extra added)
+[ ] No regressions introduced
+[ ] Edge cases handled (or explicitly documented as out-of-scope)
+[ ] Changes are testable/verifiable
+[ ] Anti-patterns avoided (did you check what NOT to do?)"#
+            );
+
+            Ok(CallToolResult::text(prompt))
         }
         _ => Err(ErrorObject::method_not_found(name)),
     }
