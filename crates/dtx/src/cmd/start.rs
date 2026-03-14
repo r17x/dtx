@@ -95,32 +95,36 @@ pub async fn run(
     };
 
     // Step 1: nix environment
-    let mut nix_env: Option<HashMap<String, String>> = if effective_flake_dir.join("flake.nix").exists()
-    {
-        pipe.animate(1, "loading");
-        match DevEnvironment::from_flake(&effective_flake_dir).await {
-            Ok(env) => {
-                pipe.done(1, &format!("{} vars", env.var_count()));
-                Some(env.env_vars)
+    let mut nix_env: Option<HashMap<String, String>> =
+        if effective_flake_dir.join("flake.nix").exists() {
+            pipe.animate(1, "loading");
+            match DevEnvironment::from_flake(&effective_flake_dir).await {
+                Ok(env) => {
+                    pipe.done(1, &format!("{} vars", env.var_count()));
+                    Some(env.env_vars)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to extract Nix environment: {}", e);
+                    pipe.fail(1, &format!("{}", e));
+                    deferred_warnings.push("Services will use system PATH instead.".into());
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!("Failed to extract Nix environment: {}", e);
-                pipe.fail(1, &format!("{}", e));
-                deferred_warnings.push("Services will use system PATH instead.".into());
-                None
-            }
-        }
-    } else {
-        pipe.done_untimed(1, "skipped");
-        None
-    };
+        } else {
+            pipe.done_untimed(1, "skipped");
+            None
+        };
 
     // Step 1b: build custom flake packages not on devShell PATH
     if let Some(ref mut env) = nix_env {
         let extra = build_flake_packages(&services, &effective_flake_dir, env).await;
         if !extra.is_empty() {
             let names: Vec<&str> = extra.iter().map(|(n, _)| n.as_str()).collect();
-            tracing::info!("built {} flake package(s): {}", extra.len(), names.join(", "));
+            tracing::info!(
+                "built {} flake package(s): {}",
+                extra.len(),
+                names.join(", ")
+            );
             let extra_bin: Vec<String> = extra
                 .into_iter()
                 .map(|(_, p)| p.join("bin").to_string_lossy().to_string())

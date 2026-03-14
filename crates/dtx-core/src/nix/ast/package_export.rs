@@ -4,10 +4,10 @@
 //! to move each inline definition into `packages = { ... }` and replaces the original
 //! site with a reference (e.g. `self'.packages.vault-bootstrap`).
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use super::parser::parse_nix;
 use super::script_detection::DetectedScript;
@@ -211,8 +211,7 @@ fn build_replacement(attr_text: &str, reference: &str) -> String {
 
     // Find `command =` before the writeShell call
     let before_ws = &attr_text[..ws_pos];
-    static CMD_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"command\s*=\s*\S*\s*$").unwrap());
+    static CMD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"command\s*=\s*\S*\s*$").unwrap());
     let command_eq_re = &*CMD_RE;
 
     if let Some(cmd_match) = command_eq_re.find(before_ws) {
@@ -475,9 +474,8 @@ fn find_matching_brace(content: &str, pos: usize) -> Option<usize> {
 /// Extract names of existing entries in a packages block body.
 fn extract_existing_package_names(block_body: &str) -> Vec<String> {
     // Match both unquoted (`foo =`) and quoted (`"foo" =`) attribute names
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?m)^\s*(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_-]*))\s*="#).unwrap()
-    });
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"(?m)^\s*(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_-]*))\s*="#).unwrap());
     RE.captures_iter(block_body)
         .filter_map(|c| {
             c.get(1)

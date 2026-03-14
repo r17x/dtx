@@ -366,7 +366,11 @@ pub async fn run(ctx: &mut Context, out: &Output, args: ImportArgs) -> Result<()
             let (export_count, names) =
                 dtx_core::translation::import::export_custom_scripts(&mut config, project_root);
             if export_count > 0 {
-                nix_notes.push(format!("{} script(s) exported: {}", export_count, names.join(", ")));
+                nix_notes.push(format!(
+                    "{} script(s) exported: {}",
+                    export_count,
+                    names.join(", ")
+                ));
             }
 
             if nix_notes.is_empty() {
