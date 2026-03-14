@@ -119,7 +119,7 @@ jobs:
           rm dtx
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -169,7 +169,7 @@ jobs:
           rm dtx
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-${{ matrix.arch }}
           path: dist/*
@@ -193,7 +193,7 @@ jobs:
           sha256sum dtx-${DTX_VERSION}-source.tar.gz > dtx-${DTX_VERSION}-source.tar.gz.sha256
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: source-tarball
           path: dist/*
@@ -220,7 +220,7 @@ jobs:
           cat ../dist/dtx-${DTX_VERSION}-checksums.txt
 
       - name: Upload Checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checksums
           path: dist/*
