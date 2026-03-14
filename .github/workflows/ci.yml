@@ -32,9 +32,8 @@ jobs:
       - uses: DeterminateSystems/flake-checker-action@v12
       - uses: cachix/cachix-action@v16
         with:
-          name: r17x
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+          name: r17
+          skipPush: true
         continue-on-error: true
 
       - name: Nix Flake Show
@@ -88,7 +87,7 @@ jobs:
         if: runner.os == 'Linux'
       - uses: cachix/cachix-action@v16
         with:
-          name: r17x
+          name: r17
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
         continue-on-error: true
@@ -113,9 +112,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: cachix/cachix-action@v16
         with:
-          name: r17x
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+          name: r17
+          skipPush: true
         continue-on-error: true
 
       - name: Clippy Check
@@ -135,9 +133,8 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: cachix/cachix-action@v16
         with:
-          name: r17x
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          skipPush: ${{ !(github.ref == 'refs/heads/master' && github.event_name == 'push') }}
+          name: r17
+          skipPush: true
         continue-on-error: true
 
       - name: Format Check
