@@ -239,7 +239,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path"]
             }),
         )
-        .with_description("Get symbol overview for a file"),
+        .with_description("Get file's symbol table of contents. Start here to understand structure before targeted edits."),
         Tool::new(
             "find_symbol",
             serde_json::json!({
@@ -266,7 +266,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["name_path_pattern"]
             }),
         )
-        .with_description("Find symbols by name path pattern"),
+        .with_description("Find symbols by name pattern. Use with replace_symbol_body to read then edit. Set include_body: true to read source."),
         Tool::new(
             "find_references",
             serde_json::json!({
@@ -284,7 +284,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["symbol_name"]
             }),
         )
-        .with_description("Find all references to a symbol"),
+        .with_description("Find all references to a symbol name across the workspace."),
         Tool::new(
             "search_pattern",
             serde_json::json!({
@@ -307,7 +307,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
         )
-        .with_description("Search for a regex pattern across files"),
+        .with_description("Search for regex pattern across workspace files. Returns matching lines with context."),
         Tool::new(
             "replace_symbol_body",
             serde_json::json!({
@@ -324,12 +324,16 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "new_body": {
                         "type": "string",
                         "description": "New source code to replace the symbol body"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "new_body"]
             }),
         )
-        .with_description("Replace a symbol's body with new source code"),
+        .with_description("Replace a symbol's entire definition. Use find_symbol first to locate target. Pass content_hash to prevent stale edits."),
         Tool::new(
             "insert_before_symbol",
             serde_json::json!({
@@ -346,12 +350,16 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "content": {
                         "type": "string",
                         "description": "Source code to insert before the symbol"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code before a symbol"),
+        .with_description("Insert code before a symbol. Use find_symbol first to locate target."),
         Tool::new(
             "insert_after_symbol",
             serde_json::json!({
@@ -368,12 +376,16 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "content": {
                         "type": "string",
                         "description": "Source code to insert after the symbol"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code after a symbol"),
+        .with_description("Insert code after a symbol. Use find_symbol first to locate target."),
         Tool::new(
             "insert_at_line",
             serde_json::json!({
@@ -390,6 +402,10 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "content": {
                         "type": "string",
                         "description": "Content to insert"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "line", "content"]
@@ -416,6 +432,10 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "new_content": {
                         "type": "string",
                         "description": "Replacement content"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "start_line", "end_line", "new_content"]
@@ -438,12 +458,17 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "new_name": {
                         "type": "string",
                         "description": "New name for the symbol"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Preview changes without writing files (default: false)",
+                        "default": false
                     }
                 },
                 "required": ["path", "name_path", "new_name"]
             }),
         )
-        .with_description("Rename a symbol across all files"),
+        .with_description("Rename a symbol across all files with word-boundary matching. Use dry_run: true to preview changes."),
         Tool::new(
             "find_referencing_symbols",
             serde_json::json!({
@@ -461,7 +486,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["symbol_name"]
             }),
         )
-        .with_description("Find all references with containing symbol context"),
+        .with_description("Find all symbols that reference a given symbol. Use for impact analysis before refactoring."),
         Tool::new(
             "find_file",
             serde_json::json!({
@@ -475,7 +500,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
         )
-        .with_description("Find files matching a glob pattern"),
+        .with_description("Find files matching a glob pattern in the workspace."),
         Tool::new(
             "list_dir",
             serde_json::json!({
@@ -641,63 +666,7 @@ pub fn dtx_onboarding_tools() -> Vec<Tool> {
     ]
 }
 
-/// Get meta-cognitive thinking tools (3).
-pub fn dtx_meta_tools() -> Vec<Tool> {
-    vec![
-        Tool::new(
-            "think_about_collected_information",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "thoughts": {
-                        "type": "string",
-                        "description": "Your collected information and current thinking about the problem"
-                    }
-                },
-                "required": ["thoughts"]
-            }),
-        )
-        .with_description("Structure analysis of collected information using Context Excavation + Constraint Mapping"),
-        Tool::new(
-            "think_about_task_adherence",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The task you are working on"
-                    },
-                    "thoughts": {
-                        "type": "string",
-                        "description": "Your current approach and decisions so far"
-                    }
-                },
-                "required": ["task", "thoughts"]
-            }),
-        )
-        .with_description("Validate approach against task using Why Ladder + Anti-Pattern Check"),
-        Tool::new(
-            "think_about_whether_you_are_done",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The task you are working on"
-                    },
-                    "thoughts": {
-                        "type": "string",
-                        "description": "Your assessment of completion status"
-                    }
-                },
-                "required": ["task", "thoughts"]
-            }),
-        )
-        .with_description("Validate completion using Synthesis Validation + The Ultimate Test"),
-    ]
-}
-
-/// Get all dtx tools (resource + code + memory + onboarding + meta).
+/// Get all dtx tools (resource + code + memory + onboarding).
 #[allow(unused_mut)]
 pub fn dtx_tools() -> Vec<Tool> {
     let mut tools = dtx_resource_tools();
@@ -710,8 +679,6 @@ pub fn dtx_tools() -> Vec<Tool> {
 
     #[cfg(all(feature = "code", feature = "memory"))]
     tools.extend(dtx_onboarding_tools());
-
-    tools.extend(dtx_meta_tools());
 
     tools
 }

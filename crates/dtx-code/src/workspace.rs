@@ -57,13 +57,16 @@ pub struct SymbolMatch {
 
 pub struct WorkspaceIndex {
     root: PathBuf,
+    root_canonical: PathBuf,
     cache: DashMap<PathBuf, FileIndex>,
 }
 
 impl WorkspaceIndex {
     pub fn new(root: PathBuf) -> Self {
+        let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
         Self {
             root,
+            root_canonical,
             cache: DashMap::new(),
         }
     }
@@ -85,19 +88,26 @@ impl WorkspaceIndex {
         files
     }
 
-    pub fn resolve_path(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+    pub fn resolve_path(&self, path: &Path) -> Result<PathBuf> {
+        let resolved = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.root.join(path)
+        };
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|_| CodeError::FileNotFound(resolved.display().to_string()))?;
+        if !canonical.starts_with(&self.root_canonical) {
+            return Err(CodeError::PathTraversal(path.display().to_string()));
         }
+        Ok(canonical)
     }
 
     pub fn get_or_parse(
         &self,
         path: &Path,
     ) -> Result<dashmap::mapref::one::Ref<'_, PathBuf, FileIndex>> {
-        let abs = self.resolve_path(path);
+        let abs = self.resolve_path(path)?;
 
         let current_mtime = std::fs::metadata(&abs)
             .and_then(|m| m.modified())
@@ -130,7 +140,9 @@ impl WorkspaceIndex {
     }
 
     pub fn invalidate(&self, path: &Path) {
-        self.cache.remove(&self.resolve_path(path));
+        if let Ok(abs) = self.resolve_path(path) {
+            self.cache.remove(&abs);
+        }
     }
 
     pub fn symbols_in_file(&self, path: &Path) -> Result<Vec<Symbol>> {
@@ -149,7 +161,7 @@ impl WorkspaceIndex {
         let mut results = Vec::new();
 
         if let Some(p) = path {
-            let abs = self.resolve_path(p);
+            let abs = self.resolve_path(p)?;
             let src = match source {
                 Some(s) => s.to_string(),
                 None => std::fs::read_to_string(&abs)?,
@@ -230,7 +242,7 @@ impl WorkspaceIndex {
 
     /// List directory contents.
     pub fn list_dir(&self, path: &Path, recursive: bool) -> Result<Vec<DirEntryInfo>> {
-        let abs = self.resolve_path(path);
+        let abs = self.resolve_path(path)?;
 
         let mut entries = Vec::new();
         if recursive {
@@ -265,7 +277,7 @@ impl WorkspaceIndex {
     }
 
     pub fn get_overview(&self, path: &Path, depth: Option<usize>) -> Result<SymbolOverview> {
-        let abs = self.resolve_path(path);
+        let abs = self.resolve_path(path)?;
         let entry = self.get_or_parse(&abs)?;
         let symbols = match depth {
             Some(d) => truncate_depth(&entry.symbols, d),
@@ -456,6 +468,7 @@ def standalone_fn():
             &path,
             "standalone",
             "fn standalone() -> bool {\n    false\n}",
+            None,
         )
         .expect("replace");
 
@@ -489,8 +502,8 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         let path = root.join("lib.rs");
-        let result =
-            crate::rename::rename_symbol(&ws, &path, "standalone", "helper").expect("rename");
+        let result = crate::rename::rename_symbol(&ws, &path, "standalone", "helper", false)
+            .expect("rename");
         assert_eq!(result.old_name, "standalone");
         assert_eq!(result.new_name, "helper");
         assert!(result.occurrences_replaced >= 1);
@@ -504,7 +517,7 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         let path = root.join("lib.rs");
-        let result = crate::rename::rename_symbol(&ws, &path, "nonexistent", "new_name");
+        let result = crate::rename::rename_symbol(&ws, &path, "nonexistent", "new_name", false);
         assert!(result.is_err());
     }
 
@@ -521,7 +534,7 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         let path = root.join("lib.rs");
-        crate::edit::insert_at_line(&ws, &path, 1, "// header\n").expect("insert");
+        crate::edit::insert_at_line(&ws, &path, 1, "// header\n", None).expect("insert");
         let content = std::fs::read_to_string(&path).expect("read");
         assert!(content.starts_with("// header\n"));
     }
@@ -533,7 +546,7 @@ def standalone_fn():
         let path = root.join("lib.rs");
         let original = std::fs::read_to_string(&path).expect("read");
         let original_lines: Vec<&str> = original.lines().collect();
-        crate::edit::insert_at_line(&ws, &path, 3, "// inserted\n").expect("insert");
+        crate::edit::insert_at_line(&ws, &path, 3, "// inserted\n", None).expect("insert");
         let content = std::fs::read_to_string(&path).expect("read");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines[2], "// inserted");
@@ -547,7 +560,8 @@ def standalone_fn():
         let path = root.join("lib.rs");
         let original = std::fs::read_to_string(&path).expect("read");
         let line_count = original.lines().count();
-        crate::edit::insert_at_line(&ws, &path, line_count + 1, "// footer\n").expect("insert");
+        crate::edit::insert_at_line(&ws, &path, line_count + 1, "// footer\n", None)
+            .expect("insert");
         let content = std::fs::read_to_string(&path).expect("read");
         assert!(content.contains("// footer"));
     }
@@ -559,7 +573,7 @@ def standalone_fn():
         let path = root.join("lib.rs");
         let original = std::fs::read_to_string(&path).expect("read");
         let line_count = original.lines().count();
-        let result = crate::edit::insert_at_line(&ws, &path, line_count + 100, "nope\n");
+        let result = crate::edit::insert_at_line(&ws, &path, line_count + 100, "nope\n", None);
         assert!(result.is_err());
     }
 
@@ -568,7 +582,7 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         let path = root.join("lib.rs");
-        crate::edit::replace_lines(&ws, &path, 2, 2, "// replaced\n").expect("replace");
+        crate::edit::replace_lines(&ws, &path, 2, 2, "// replaced\n", None).expect("replace");
         let content = std::fs::read_to_string(&path).expect("read");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines[1], "// replaced");
@@ -581,7 +595,8 @@ def standalone_fn():
         let path = root.join("lib.rs");
         let original = std::fs::read_to_string(&path).expect("read");
         let original_line_count = original.lines().count();
-        crate::edit::replace_lines(&ws, &path, 2, 4, "// single replacement\n").expect("replace");
+        crate::edit::replace_lines(&ws, &path, 2, 4, "// single replacement\n", None)
+            .expect("replace");
         let content = std::fs::read_to_string(&path).expect("read");
         let new_line_count = content.lines().count();
         // Replaced 3 lines with 1 line
@@ -594,7 +609,7 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         let path = root.join("lib.rs");
-        let result = crate::edit::replace_lines(&ws, &path, 5, 3, "nope\n");
+        let result = crate::edit::replace_lines(&ws, &path, 5, 3, "nope\n", None);
         assert!(result.is_err());
     }
 

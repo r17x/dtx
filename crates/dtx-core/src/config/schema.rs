@@ -48,6 +48,10 @@ pub struct DtxConfig {
     /// AI configuration (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiConfig>,
+
+    /// MCP server configuration (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpConfig>,
 }
 
 fn default_version() -> String {
@@ -150,6 +154,11 @@ pub struct GlobalNixConfig {
     #[serde(default)]
     pub mappings: IndexMap<String, String>,
 }
+
+/// MCP server configuration.
+// Future: transport config, workspace roots
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct McpConfig {}
 
 /// AI provider configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -760,5 +769,26 @@ resources:
 
         assert_eq!(parsed.project.name, "test");
         assert!(parsed.resources.contains_key("api"));
+    }
+
+    #[test]
+    fn parse_mcp_config() {
+        let yaml = r#"
+project:
+  name: test
+mcp: {}
+"#;
+        let config = DtxConfig::from_yaml(yaml).unwrap();
+        assert!(config.mcp.is_some());
+    }
+
+    #[test]
+    fn mcp_config_defaults_to_none() {
+        let yaml = r#"
+project:
+  name: test
+"#;
+        let config = DtxConfig::from_yaml(yaml).unwrap();
+        assert!(config.mcp.is_none());
     }
 }

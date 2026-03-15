@@ -229,6 +229,7 @@ fn merge_config(base: DtxConfig, overlay: DtxConfig) -> DtxConfig {
         defaults: overlay.defaults.or(base.defaults),
         nix: merge_nix_config(base.nix, overlay.nix),
         ai: overlay.ai.or(base.ai),
+        mcp: overlay.mcp.or(base.mcp),
     }
 }
 

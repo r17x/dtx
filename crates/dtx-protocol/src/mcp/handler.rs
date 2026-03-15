@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-/// Arg extraction helpers — reduce boilerplate when parsing MCP tool arguments.
-/// LLMs frequently send booleans as strings, so `arg_bool` handles both.
+#[cfg(any(feature = "code", feature = "memory"))]
 mod args {
     use crate::jsonrpc::ErrorObject;
 
@@ -91,6 +90,7 @@ pub struct DefaultMcpHandler<H> {
     inner: H,
     server_info: ServerInfo,
     project_id: String,
+    initialized: std::sync::atomic::AtomicBool,
     #[cfg(feature = "code")]
     code: Option<Arc<dtx_code::WorkspaceIndex>>,
     #[cfg(feature = "memory")]
@@ -104,6 +104,7 @@ impl<H> DefaultMcpHandler<H> {
             inner,
             server_info: ServerInfo::default(),
             project_id: "default".to_string(),
+            initialized: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "code")]
             code: None,
             #[cfg(feature = "memory")]
@@ -150,11 +151,24 @@ impl<H> DefaultMcpHandler<H> {
             .as_ref()
             .ok_or_else(|| ErrorObject::internal_error("Memory store not configured"))
     }
+
+    fn require_initialized(&self) -> Result<(), ErrorObject> {
+        if !self.initialized.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ErrorObject::new(
+                -32002,
+                "Server not initialized. Send initialize request first.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
     async fn initialize(&self, _params: InitializeParams) -> Result<InitializeResult, ErrorObject> {
+        self.initialized
+            .store(true, std::sync::atomic::Ordering::Release);
+
         Ok(InitializeResult {
             protocol_version: super::types::MCP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities::default(),
@@ -163,6 +177,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
     }
 
     async fn list_resources(&self) -> Result<ListResourcesResult, ErrorObject> {
+        self.require_initialized()?;
         let result = self.inner.resource_list().await?;
 
         #[allow(unused_mut)]
@@ -218,6 +233,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
         &self,
         params: ReadResourceParams,
     ) -> Result<ReadResourceResult, ErrorObject> {
+        self.require_initialized()?;
         let uri =
             uris::parse(&params.uri).ok_or_else(|| ErrorObject::invalid_params("Invalid URI"))?;
 
@@ -339,10 +355,13 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
     }
 
     async fn list_tools(&self) -> Result<ListToolsResult, ErrorObject> {
+        self.require_initialized()?;
         Ok(ListToolsResult { tools: dtx_tools() })
     }
 
     async fn call_tool(&self, params: CallToolParams) -> Result<CallToolResult, ErrorObject> {
+        self.require_initialized()?;
+
         let get_id = |args: &Option<serde_json::Value>| -> Result<String, ErrorObject> {
             args.as_ref()
                 .and_then(|a| a.get("id"))
@@ -409,7 +428,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
                 Ok(CallToolResult::text("All resources stopped"))
             }
 
-            // Code intelligence tools
+            // Code intelligence tools (sync I/O — run off async runtime)
             #[cfg(feature = "code")]
             "get_symbols_overview"
             | "find_symbol"
@@ -424,35 +443,79 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
             | "rename_symbol"
             | "find_file"
             | "list_dir" => {
-                let code = self.require_code()?;
-                handle_code_tool(code, &params.name, &params.arguments)
+                let code = self.require_code()?.clone();
+                let name = params.name.clone();
+                let arguments = params.arguments.clone();
+                tokio::task::spawn_blocking(move || handle_code_tool(&code, &name, &arguments))
+                    .await
+                    .map_err(|e| ErrorObject::internal_error(format!("Task join error: {e}")))?
             }
 
-            // Memory tools
+            // Memory tools (sync I/O — run off async runtime)
             #[cfg(feature = "memory")]
             "list_memories" | "read_memory" | "write_memory" | "edit_memory" | "delete_memory" => {
-                let mem = self.require_memory()?;
-                handle_memory_tool(mem, &params.name, &params.arguments)
+                let mem = self.require_memory()?.clone();
+                let name = params.name.clone();
+                let arguments = params.arguments.clone();
+                tokio::task::spawn_blocking(move || handle_memory_tool(&mem, &name, &arguments))
+                    .await
+                    .map_err(|e| ErrorObject::internal_error(format!("Task join error: {e}")))?
             }
 
-            // Onboarding tools (require both code + memory)
+            // Onboarding tools (sync I/O — run off async runtime)
             #[cfg(all(feature = "code", feature = "memory"))]
             "onboarding" | "check_onboarding_performed" | "initial_instructions" => {
-                let code = self.require_code()?;
-                let mem = self.require_memory()?;
-                handle_onboarding_tool(code, mem, &params.name, &params.arguments)
-            }
-
-            // Meta-cognitive tools
-            "think_about_collected_information"
-            | "think_about_task_adherence"
-            | "think_about_whether_you_are_done" => {
-                handle_meta_tool(&params.name, &params.arguments)
+                let code = self.require_code()?.clone();
+                let mem = self.require_memory()?.clone();
+                let name = params.name.clone();
+                let arguments = params.arguments.clone();
+                tokio::task::spawn_blocking(move || {
+                    handle_onboarding_tool(&code, &mem, &name, &arguments)
+                })
+                .await
+                .map_err(|e| ErrorObject::internal_error(format!("Task join error: {e}")))?
             }
 
             _ => Err(ErrorObject::method_not_found(&params.name)),
         }
     }
+}
+
+#[cfg(feature = "code")]
+fn append_note(result: &mut CallToolResult, note: &str) {
+    if let Some(super::tools::ToolContent::Text { ref mut text }) = result.content.first_mut() {
+        text.push_str("\n\n");
+        text.push_str(note);
+    }
+}
+
+#[cfg(feature = "code")]
+const REFERENCE_CAP: usize = 50;
+#[cfg(feature = "code")]
+const SEARCH_CAP: usize = 30;
+
+#[cfg(feature = "code")]
+fn truncated_json<T: serde::Serialize>(items: Vec<T>, cap: usize, hint: &str) -> CallToolResult {
+    let total = items.len();
+    if total > cap {
+        let truncated: Vec<_> = items.into_iter().take(cap).collect();
+        let mut result = CallToolResult::json(&truncated);
+        append_note(
+            &mut result,
+            &format!("Showing {cap} of {total} results. Narrow with {hint} param."),
+        );
+        result
+    } else {
+        CallToolResult::json(&items)
+    }
+}
+
+#[cfg(feature = "code")]
+fn edit_ok(message: impl Into<String>, new_hash: String) -> CallToolResult {
+    CallToolResult::json(serde_json::json!({
+        "message": message.into(),
+        "content_hash": new_hash
+    }))
 }
 
 #[cfg(feature = "code")]
@@ -471,6 +534,18 @@ fn handle_code_tool(
             let path = args::require_str(a, "path")?;
             let depth = args::optional_usize(a, "depth");
             let overview = code.get_overview(Path::new(path), depth).map_err(err)?;
+            if depth.is_none() && overview.symbols.len() > 100 {
+                let shallow = code.get_overview(Path::new(path), Some(1)).map_err(err)?;
+                let count = shallow.symbols.len();
+                let mut result = CallToolResult::json(&shallow);
+                append_note(
+                    &mut result,
+                    &format!(
+                        "Showing depth=1 ({count} top-level symbols). Use depth=2 for nested symbols."
+                    ),
+                );
+                return Ok(result);
+            }
             Ok(CallToolResult::json(&overview))
         }
         "find_symbol" => {
@@ -487,13 +562,13 @@ fn handle_code_tool(
             let symbol_name = args::require_str(a, "symbol_name")?;
             let scope = args::optional_str(a, "scope_path").map(Path::new);
             let refs = dtx_code::find_references(code.root(), symbol_name, scope).map_err(err)?;
-            Ok(CallToolResult::json(&refs))
+            Ok(truncated_json(refs, REFERENCE_CAP, "scope_path"))
         }
         "find_referencing_symbols" => {
             let symbol_name = args::require_str(a, "symbol_name")?;
             let scope = args::optional_str(a, "scope_path").map(Path::new);
             let refs = dtx_code::find_referencing_symbols(code, symbol_name, scope).map_err(err)?;
-            Ok(CallToolResult::json(&refs))
+            Ok(truncated_json(refs, REFERENCE_CAP, "scope_path"))
         }
         "search_pattern" => {
             let pattern = args::require_str(a, "pattern")?;
@@ -501,58 +576,78 @@ fn handle_code_tool(
             let context = args::optional_usize(a, "context_lines").unwrap_or(2);
             let matches =
                 dtx_code::search_pattern(code.root(), pattern, glob, context).map_err(err)?;
-            Ok(CallToolResult::json(&matches))
+            Ok(truncated_json(matches, SEARCH_CAP, "glob"))
         }
         "replace_symbol_body" => {
             let path = args::require_str(a, "path")?;
             let name_path = args::require_str(a, "name_path")?;
             let new_body = args::require_str(a, "new_body")?;
-            dtx_code::replace_symbol_body(code, Path::new(path), name_path, new_body)
-                .map_err(err)?;
-            Ok(CallToolResult::text("Symbol body replaced"))
+            let hash = args::optional_str(a, "content_hash");
+            let new_hash =
+                dtx_code::replace_symbol_body(code, Path::new(path), name_path, new_body, hash)
+                    .map_err(err)?;
+            Ok(edit_ok("Symbol body replaced", new_hash))
         }
         "insert_before_symbol" => {
             let path = args::require_str(a, "path")?;
             let name_path = args::require_str(a, "name_path")?;
             let content = args::require_str(a, "content")?;
-            dtx_code::insert_before_symbol(code, Path::new(path), name_path, content)
-                .map_err(err)?;
-            Ok(CallToolResult::text("Content inserted before symbol"))
+            let hash = args::optional_str(a, "content_hash");
+            let new_hash =
+                dtx_code::insert_before_symbol(code, Path::new(path), name_path, content, hash)
+                    .map_err(err)?;
+            Ok(edit_ok("Content inserted before symbol", new_hash))
         }
         "insert_after_symbol" => {
             let path = args::require_str(a, "path")?;
             let name_path = args::require_str(a, "name_path")?;
             let content = args::require_str(a, "content")?;
-            dtx_code::insert_after_symbol(code, Path::new(path), name_path, content)
-                .map_err(err)?;
-            Ok(CallToolResult::text("Content inserted after symbol"))
+            let hash = args::optional_str(a, "content_hash");
+            let new_hash =
+                dtx_code::insert_after_symbol(code, Path::new(path), name_path, content, hash)
+                    .map_err(err)?;
+            Ok(edit_ok("Content inserted after symbol", new_hash))
         }
         "insert_at_line" => {
             let path = args::require_str(a, "path")?;
             let line = args::require_usize(a, "line")?;
             let content = args::require_str(a, "content")?;
-            dtx_code::insert_at_line(code, Path::new(path), line, content).map_err(err)?;
-            Ok(CallToolResult::text(format!(
-                "Content inserted at line {line}"
-            )))
+            let hash = args::optional_str(a, "content_hash");
+            let new_hash = dtx_code::insert_at_line(code, Path::new(path), line, content, hash)
+                .map_err(err)?;
+            Ok(edit_ok(
+                format!("Content inserted at line {line}"),
+                new_hash,
+            ))
         }
         "replace_lines" => {
             let path = args::require_str(a, "path")?;
             let start_line = args::require_usize(a, "start_line")?;
             let end_line = args::require_usize(a, "end_line")?;
             let new_content = args::require_str(a, "new_content")?;
-            dtx_code::replace_lines(code, Path::new(path), start_line, end_line, new_content)
-                .map_err(err)?;
-            Ok(CallToolResult::text(format!(
-                "Lines {start_line}-{end_line} replaced"
-            )))
+            let hash = args::optional_str(a, "content_hash");
+            let new_hash = dtx_code::replace_lines(
+                code,
+                Path::new(path),
+                start_line,
+                end_line,
+                new_content,
+                hash,
+            )
+            .map_err(err)?;
+            Ok(edit_ok(
+                format!("Lines {start_line}-{end_line} replaced"),
+                new_hash,
+            ))
         }
         "rename_symbol" => {
             let path = args::require_str(a, "path")?;
             let name_path = args::require_str(a, "name_path")?;
             let new_name = args::require_str(a, "new_name")?;
+            let dry_run = args::optional_bool(a, "dry_run", false);
             let result =
-                dtx_code::rename_symbol(code, Path::new(path), name_path, new_name).map_err(err)?;
+                dtx_code::rename_symbol(code, Path::new(path), name_path, new_name, dry_run)
+                    .map_err(err)?;
             Ok(CallToolResult::json(&result))
         }
         "find_file" => {
@@ -723,7 +818,10 @@ fn handle_onboarding_tool(
             ];
             let key_files: Vec<String> = well_known
                 .iter()
-                .filter(|f| code.resolve_path(std::path::Path::new(f)).exists())
+                .filter(|f| {
+                    code.resolve_path(std::path::Path::new(f))
+                        .is_ok_and(|p| p.exists())
+                })
                 .map(|f| f.to_string())
                 .collect();
 
@@ -741,7 +839,10 @@ fn handle_onboarding_tool(
             ];
             let entry_points: Vec<String> = entry_candidates
                 .iter()
-                .filter(|f| code.resolve_path(std::path::Path::new(f)).exists())
+                .filter(|f| {
+                    code.resolve_path(std::path::Path::new(f))
+                        .is_ok_and(|p| p.exists())
+                })
                 .map(|f| f.to_string())
                 .collect();
 
@@ -805,7 +906,7 @@ fn handle_onboarding_tool(
 - `get_logs` — Get resource logs (default: 50 lines)
 - `start_all`, `stop_all` — Batch operations
 
-### Code Intelligence (7+ tools)
+### Code Intelligence (13 tools)
 - `get_symbols_overview` — Get symbol tree for a file (use `depth` to limit)
 - `find_symbol` — Search by name_path pattern (substring match), optionally include body
 - `find_references` / `find_referencing_symbols` — Find all references with containing symbol context
@@ -832,146 +933,15 @@ fn handle_onboarding_tool(
 - `check_onboarding_performed` — Check if onboarding has been done
 - `initial_instructions` — This help text
 
-### Meta-Cognitive (3 tools)
-- `think_about_collected_information` — Structure analysis of gathered context
-- `think_about_task_adherence` — Validate approach against task requirements
-- `think_about_whether_you_are_done` — Completion validation checklist
-
 ## Recommended Workflow
 
 1. Run `onboarding` first to discover project structure
 2. Use `find_symbol` and `get_symbols_overview` to explore code (prefer over reading full files)
 3. Use `find_references` / `find_referencing_symbols` to understand dependencies
 4. Use symbol-level editing tools for precise modifications
-5. Use `think_about_*` tools for structured reasoning on complex tasks
-6. Save important context to memory for future sessions
+5. Save important context to memory for future sessions
 "#;
             Ok(CallToolResult::text(instructions))
-        }
-        _ => Err(ErrorObject::method_not_found(name)),
-    }
-}
-
-fn handle_meta_tool(
-    name: &str,
-    raw_args: &Option<serde_json::Value>,
-) -> Result<CallToolResult, ErrorObject> {
-    let a = args::require(raw_args)?;
-
-    match name {
-        "think_about_collected_information" => {
-            let thoughts = args::require_str(a, "thoughts")?;
-
-            let prompt = format!(
-                r#"THE QUESTION CASCADE (applied to your collected information):
-
-Your information:
-{thoughts}
-
----
-
-Phase 1: CONTEXT EXCAVATION
-- Why does this problem exist? (not what was asked, but why it was asked)
-- What created the conditions for this problem?
-- What happens if we don't solve it?
-- What has been tried before? What failed?
-
-Phase 2: CONSTRAINT MAPPING
-- HARD CONSTRAINTS (cannot violate): [identify from your information]
-- SOFT CONSTRAINTS (prefer not to violate): [identify from your information]
-- What CAN'T we do? (constraints define the solution space)
-
-Phase 3: FIVE LAYERS CHECK
-- Layer 5 (Ecosystem): What external forces/patterns are relevant?
-- Layer 4 (Organization): What team/project constraints exist?
-- Layer 3 (User/Stakeholder): Who uses this and what do they REALLY need?
-- Layer 2 (System): What are the components and how do they interact?
-- Layer 1 (Implementation): What exactly needs to be built/changed?
-
-GAPS: What information is missing at each layer?
-If you can't answer a layer → that's your next research target."#
-            );
-
-            Ok(CallToolResult::text(prompt))
-        }
-        "think_about_task_adherence" => {
-            let task = args::require_str(a, "task")?;
-            let thoughts = args::require_str(a, "thoughts")?;
-
-            let prompt = format!(
-                r#"THE WHY LADDER (trace every decision):
-
-Your task: {task}
-Your current state: {thoughts}
-
----
-
-For each decision you've made so far:
-├─ Can you trace it UP to the task goal? (Why does this help?)
-├─ Can you trace it DOWN to implementation? (How does this work?)
-└─ If either trace breaks → the decision is ungrounded. Reconsider.
-
-ANTI-PATTERN CHECK (define failures before successes):
-- What could go WRONG with your current approach?
-- Which failures are catastrophic vs recoverable?
-- Are you solving the STATED problem or the REAL problem?
-
-CONSTRAINT VIOLATION CHECK:
-- Are you violating any hard constraints?
-- Are you drifting from scope? (doing more than asked)
-- Are you making assumptions that should be questions?
-
-STATE MACHINE CHECK:
-- What state are you in? (exploring | planning | implementing | verifying)
-- What's the exit condition for this state?
-- What failure conditions exist in this state?
-- What's the recovery path if you're stuck?"#
-            );
-
-            Ok(CallToolResult::text(prompt))
-        }
-        "think_about_whether_you_are_done" => {
-            let task = args::require_str(a, "task")?;
-            let thoughts = args::require_str(a, "thoughts")?;
-
-            let prompt = format!(
-                r#"THE SYNTHESIS VALIDATION:
-
-Your task: {task}
-Your assessment: {thoughts}
-
----
-
-COHERENCE CHECK (every decision traces):
-For each change you made:
-├─ Can you trace UP to the task goal? (Why Ladder)
-├─ Can you trace DOWN to implementation? (How Path)
-└─ Does it conflict with any other change?
-If any answer is NO → you're not done.
-
-FAILURE MODE ANALYSIS:
-- List 5+ ways your solution could fail
-- Which failures are catastrophic vs recoverable?
-- Did you prevent the catastrophic ones?
-
-THE ULTIMATE TEST:
-Can someone who has never seen your work:
-├─ Read your changes
-├─ Understand WHY every decision was made
-├─ Know what NOT to do (failure modes you considered)
-└─ Verify the solution is correct?
-If NO → what's missing? Add it.
-
-COMPLETION CHECKLIST:
-[ ] All requirements from the task are met
-[ ] No scope drift (nothing extra added)
-[ ] No regressions introduced
-[ ] Edge cases handled (or explicitly documented as out-of-scope)
-[ ] Changes are testable/verifiable
-[ ] Anti-patterns avoided (did you check what NOT to do?)"#
-            );
-
-            Ok(CallToolResult::text(prompt))
         }
         _ => Err(ErrorObject::method_not_found(name)),
     }
@@ -1103,9 +1073,21 @@ mod tests {
         assert_eq!(result.server_info.name, "dtx");
     }
 
+    fn init_params() -> InitializeParams {
+        InitializeParams {
+            protocol_version: "2024-11-05".to_string(),
+            capabilities: Default::default(),
+            client_info: super::super::types::ClientInfo {
+                name: "test".to_string(),
+                version: "1.0".to_string(),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn mcp_list_resources() {
         let handler = DefaultMcpHandler::new(MockProtocolHandler::new());
+        handler.initialize(init_params()).await.unwrap();
         let result = handler.list_resources().await.unwrap();
         assert_eq!(result.resources.len(), 1);
         assert!(result.resources[0].uri.contains("postgres"));
@@ -1114,6 +1096,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_list_tools() {
         let handler = DefaultMcpHandler::new(MockProtocolHandler::new());
+        handler.initialize(init_params()).await.unwrap();
         let result = handler.list_tools().await.unwrap();
         assert!(!result.tools.is_empty());
     }
@@ -1122,6 +1105,7 @@ mod tests {
     async fn mcp_call_tool() {
         let mock = MockProtocolHandler::new();
         let handler = DefaultMcpHandler::new(mock);
+        handler.initialize(init_params()).await.unwrap();
 
         let result = handler
             .call_tool(CallToolParams {
@@ -1132,5 +1116,12 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_initialization() {
+        let handler = DefaultMcpHandler::new(MockProtocolHandler::new());
+        let err = handler.list_tools().await.unwrap_err();
+        assert_eq!(err.code, -32002);
     }
 }

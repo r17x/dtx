@@ -1,8 +1,20 @@
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{CodeError, Result};
 use crate::symbol::Symbol;
 use crate::workspace::WorkspaceIndex;
+
+pub fn content_hash(data: &[u8]) -> String {
+    let hash = Sha256::digest(data);
+    format!("{:x}", hash)
+}
+
+pub fn file_content_hash(path: &Path) -> Result<String> {
+    let content = std::fs::read(path)?;
+    Ok(content_hash(&content))
+}
 
 /// Shared context for symbol-level edits: resolves path, reads file, finds symbol.
 fn prepare_edit(
@@ -10,7 +22,7 @@ fn prepare_edit(
     path: &Path,
     name_path: &str,
 ) -> Result<(std::path::PathBuf, String, Symbol)> {
-    let abs = workspace.resolve_path(path);
+    let abs = workspace.resolve_path(path)?;
     let content = std::fs::read_to_string(&abs)?;
     let idx = workspace.get_or_parse(&abs)?;
     let symbol = find_symbol_by_name_path(&idx.symbols, name_path)
@@ -18,15 +30,26 @@ fn prepare_edit(
     Ok((abs, content, symbol))
 }
 
-/// Write new content and invalidate the workspace cache.
+/// Write new content and invalidate the workspace cache. Returns the SHA256 hash of the new content.
 pub(crate) fn finalize_edit(
     workspace: &WorkspaceIndex,
     abs: &Path,
     new_content: &str,
-) -> Result<()> {
+    expected_hash: Option<&str>,
+) -> Result<String> {
+    if let Some(expected) = expected_hash {
+        let actual = file_content_hash(abs)?;
+        if actual != expected {
+            return Err(CodeError::ContentMismatch {
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+    }
+    let new_hash = content_hash(new_content.as_bytes());
     std::fs::write(abs, new_content)?;
     workspace.invalidate(abs);
-    Ok(())
+    Ok(new_hash)
 }
 
 /// Compute byte offsets of each line start in content. Returns 1 entry per line.
@@ -45,13 +68,14 @@ pub fn replace_symbol_body(
     path: &Path,
     name_path: &str,
     new_body: &str,
-) -> Result<()> {
+    content_hash: Option<&str>,
+) -> Result<String> {
     let (abs, content, symbol) = prepare_edit(workspace, path, name_path)?;
     let mut new_content = String::with_capacity(content.len());
     new_content.push_str(&content[..symbol.start_byte]);
     new_content.push_str(new_body);
     new_content.push_str(&content[symbol.end_byte..]);
-    finalize_edit(workspace, &abs, &new_content)
+    finalize_edit(workspace, &abs, &new_content, content_hash)
 }
 
 pub fn insert_before_symbol(
@@ -59,13 +83,14 @@ pub fn insert_before_symbol(
     path: &Path,
     name_path: &str,
     content_to_insert: &str,
-) -> Result<()> {
+    content_hash: Option<&str>,
+) -> Result<String> {
     let (abs, content, symbol) = prepare_edit(workspace, path, name_path)?;
     let mut new_content = String::with_capacity(content.len() + content_to_insert.len());
     new_content.push_str(&content[..symbol.start_byte]);
     new_content.push_str(content_to_insert);
     new_content.push_str(&content[symbol.start_byte..]);
-    finalize_edit(workspace, &abs, &new_content)
+    finalize_edit(workspace, &abs, &new_content, content_hash)
 }
 
 pub fn insert_after_symbol(
@@ -73,13 +98,14 @@ pub fn insert_after_symbol(
     path: &Path,
     name_path: &str,
     content_to_insert: &str,
-) -> Result<()> {
+    content_hash: Option<&str>,
+) -> Result<String> {
     let (abs, content, symbol) = prepare_edit(workspace, path, name_path)?;
     let mut new_content = String::with_capacity(content.len() + content_to_insert.len());
     new_content.push_str(&content[..symbol.end_byte]);
     new_content.push_str(content_to_insert);
     new_content.push_str(&content[symbol.end_byte..]);
-    finalize_edit(workspace, &abs, &new_content)
+    finalize_edit(workspace, &abs, &new_content, content_hash)
 }
 
 pub fn insert_at_line(
@@ -87,15 +113,16 @@ pub fn insert_at_line(
     path: &Path,
     line: usize,
     content: &str,
-) -> Result<()> {
-    let abs = workspace.resolve_path(path);
+    content_hash: Option<&str>,
+) -> Result<String> {
+    let abs = workspace.resolve_path(path)?;
     let file_content = std::fs::read_to_string(&abs)?;
 
     if file_content.is_empty() {
         if line != 1 {
             return Err(CodeError::InvalidLine(line, 0));
         }
-        return finalize_edit(workspace, &abs, content);
+        return finalize_edit(workspace, &abs, content, content_hash);
     }
 
     let line_starts = compute_line_starts(&file_content);
@@ -107,7 +134,6 @@ pub fn insert_at_line(
 
     let mut new_content = String::with_capacity(file_content.len() + content.len());
     if line == line_count + 1 {
-        // Append at end
         new_content.push_str(&file_content);
         if !file_content.ends_with('\n') {
             new_content.push('\n');
@@ -120,7 +146,7 @@ pub fn insert_at_line(
         new_content.push_str(&file_content[offset..]);
     }
 
-    finalize_edit(workspace, &abs, &new_content)
+    finalize_edit(workspace, &abs, &new_content, content_hash)
 }
 
 pub fn replace_lines(
@@ -129,8 +155,9 @@ pub fn replace_lines(
     start_line: usize,
     end_line: usize,
     new_content: &str,
-) -> Result<()> {
-    let abs = workspace.resolve_path(path);
+    content_hash: Option<&str>,
+) -> Result<String> {
+    let abs = workspace.resolve_path(path)?;
     let file_content = std::fs::read_to_string(&abs)?;
 
     let line_starts = compute_line_starts(&file_content);
@@ -154,7 +181,7 @@ pub fn replace_lines(
     result.push_str(new_content);
     result.push_str(&file_content[end_offset..]);
 
-    finalize_edit(workspace, &abs, &result)
+    finalize_edit(workspace, &abs, &result, content_hash)
 }
 
 fn find_symbol_by_name_path(symbols: &[Symbol], name_path: &str) -> Option<Symbol> {

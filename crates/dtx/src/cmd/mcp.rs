@@ -1,9 +1,9 @@
 //! MCP server command for AI agent integration.
 
-use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info};
 
 use dtx_core::config::project::find_project_root_cwd;
@@ -52,51 +52,60 @@ pub async fn run(args: McpArgs) -> Result<()> {
         ),
     );
 
+    // TODO: Replace with real ResourceOrchestrator integration
     let handler = MockProtocolHandler::new();
     let mcp_handler = DefaultMcpHandler::new(handler)
         .with_code(code_index)
         .with_memory(memory_store);
 
-    // Read JSON-RPC requests from stdin and write responses to stdout
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut stdout_lock = stdout.lock();
+    // Read JSON-RPC requests from stdin and write responses to stdout (async)
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+    let mut lines = stdin.lines();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) if l.is_empty() => continue,
-            Ok(l) => l,
-            Err(e) => {
-                debug!(error = %e, "Error reading stdin");
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(line)) if line.is_empty() => continue,
+                    Ok(Some(line)) => {
+                        debug!(request = %line, "Received request");
+
+                        let request: Request = match serde_json::from_str(&line) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let error_response = Response::error(
+                                    None,
+                                    ErrorObject::parse_error(format!("Invalid JSON: {}", e)),
+                                );
+                                let json = serde_json::to_string(&error_response)?;
+                                stdout.write_all(json.as_bytes()).await?;
+                                stdout.write_all(b"\n").await?;
+                                stdout.flush().await?;
+                                continue;
+                            }
+                        };
+
+                        let response = dispatch_mcp(&mcp_handler, request).await;
+
+                        let json = serde_json::to_string(&response)?;
+                        debug!(response = %json, "Sending response");
+                        stdout.write_all(json.as_bytes()).await?;
+                        stdout.write_all(b"\n").await?;
+                        stdout.flush().await?;
+                    }
+                    Ok(None) => break, // EOF
+                    Err(e) => {
+                        debug!(error = %e, "Error reading stdin");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal");
                 break;
             }
-        };
-
-        debug!(request = %line, "Received request");
-
-        // Parse request
-        let request: Request = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let error_response = Response::error(
-                    None,
-                    ErrorObject::parse_error(format!("Invalid JSON: {}", e)),
-                );
-                let json = serde_json::to_string(&error_response)?;
-                writeln!(stdout_lock, "{}", json)?;
-                stdout_lock.flush()?;
-                continue;
-            }
-        };
-
-        // Dispatch to handler
-        let response = dispatch_mcp(&mcp_handler, request).await;
-
-        // Write response
-        let json = serde_json::to_string(&response)?;
-        debug!(response = %json, "Sending response");
-        writeln!(stdout_lock, "{}", json)?;
-        stdout_lock.flush()?;
+        }
     }
 
     info!("MCP server shutting down");
@@ -172,11 +181,15 @@ async fn dispatch_mcp<H: McpHandler>(handler: &H, request: Request) -> Response 
                 Err(_) => Response::error(id, ErrorObject::invalid_params("Invalid parameters")),
             }
         }
+        "notifications/initialized" => {
+            // Client notification that initialization is complete — no response needed.
+            Response::success(id, serde_json::Value::Null)
+        }
         method => Response::error(id, ErrorObject::method_not_found(method)),
     }
 }
 
-// Mock protocol handler for testing
+// TODO: Replace with real ResourceOrchestrator integration
 use async_trait::async_trait;
 use dtx_protocol::handler::ProtocolHandler;
 use dtx_protocol::methods::{
