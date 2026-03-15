@@ -13,6 +13,7 @@ pub use process_compose::{
 };
 pub use schema::{
     AiConfig, DefaultsConfig, DependencyConditionConfig, DependencyConfig, DtxConfig, GlobalConfig,
-    GlobalNixConfig, HealthConfig, NixConfig, ProjectMetadata, ResourceConfig, ResourceKindConfig,
-    RestartConfig, RestartPolicy, SchemaError, ShutdownConfigSchema, VmConfig, SCHEMA_VERSION,
+    GlobalNixConfig, HealthConfig, McpConfig, NixConfig, ProjectMetadata, ResourceConfig,
+    ResourceKindConfig, RestartConfig, RestartPolicy, SchemaError, ShutdownConfigSchema, VmConfig,
+    SCHEMA_VERSION,
 };

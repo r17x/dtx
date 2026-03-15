@@ -34,6 +34,23 @@ fn enrich_timestamps_from_file(memory: &mut Memory, path: &Path) {
     }
 }
 
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(MemoryError::InvalidName("empty name".into()));
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+        return Err(MemoryError::InvalidName(format!(
+            "invalid characters in name: {name}"
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(MemoryError::InvalidName(format!(
+            "name must not start with dot: {name}"
+        )));
+    }
+    Ok(())
+}
+
 impl MemoryStore {
     pub fn new(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)?;
@@ -77,6 +94,7 @@ impl MemoryStore {
     }
 
     pub fn read(&self, name: &str) -> Result<Memory> {
+        validate_name(name)?;
         let path = self.memory_path(name);
         if !path.exists() {
             return Err(MemoryError::NotFound(name.to_string()));
@@ -88,6 +106,7 @@ impl MemoryStore {
     }
 
     pub fn write(&self, memory: &Memory) -> Result<()> {
+        validate_name(&memory.meta.name)?;
         let path = self.memory_path(&memory.meta.name);
         let tmp_path = path.with_extension("md.tmp");
         let lock_path = path.with_extension("md.lock");
@@ -126,6 +145,7 @@ impl MemoryStore {
     }
 
     pub fn delete(&self, name: &str) -> Result<()> {
+        validate_name(name)?;
         let path = self.memory_path(name);
         if !path.exists() {
             return Err(MemoryError::NotFound(name.to_string()));
