@@ -6,14 +6,11 @@
         "chrome-devtools-mcp@latest"
       ]
     },
-    "serena": {
+    "dtx": {
       "type": "stdio",
-      "command": "serena",
+      "command": "dtx",
       "args": [
-        "start-mcp-server",
-        "--context",
-        "claude-code",
-        "--project-from-cwd"
+        "mcp"
       ],
       "env": {}
     }

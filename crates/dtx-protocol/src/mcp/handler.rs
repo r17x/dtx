@@ -37,6 +37,17 @@ mod args {
             .ok_or_else(|| ErrorObject::invalid_params(format!("Missing {key}")))
     }
 
+    pub fn optional_tags(args: &serde_json::Value, key: &str) -> Vec<String> {
+        match args.get(key) {
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            _ => vec![],
+        }
+    }
+
     pub fn optional_bool(args: &serde_json::Value, key: &str, default: bool) -> bool {
         args.get(key)
             .and_then(|v| {
@@ -173,7 +184,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
             protocol_version: super::types::MCP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities::default(),
             server_info: self.server_info.clone(),
-            instructions: Some("dtx provides symbol-aware code intelligence and cross-session memory. Prefer get_symbols_overview over reading full files — it shows structure with line ranges. Use find_symbol with include_body:true to read specific definitions. Use replace_symbol_body for safe refactoring. Save project context to memory with write_memory.".to_string()),
+            instructions: Some("dtx provides symbol-aware code intelligence and cross-session memory. Start with list_memories to load existing context, or onboarding for new projects. Use get_symbols_overview before reading files — it shows structure with line ranges. Use replace_symbol_body for safe refactoring, find_references for impact analysis. Persist decisions with write_memory. Use reflect to synthesize memory landscape, checkpoint to save session progress.".to_string()),
         })
     }
 
@@ -454,7 +465,8 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
 
             // Memory tools (sync I/O — run off async runtime)
             #[cfg(feature = "memory")]
-            "list_memories" | "read_memory" | "write_memory" | "edit_memory" | "delete_memory" => {
+            "list_memories" | "read_memory" | "write_memory" | "edit_memory" | "delete_memory"
+            | "reflect" | "checkpoint" => {
                 let mem = self.require_memory()?.clone();
                 let name = params.name.clone();
                 let arguments = params.arguments.clone();
@@ -482,7 +494,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
     }
 }
 
-#[cfg(feature = "code")]
+#[cfg(any(feature = "code", feature = "memory"))]
 fn append_note(result: &mut CallToolResult, note: &str) {
     if let Some(super::tools::ToolContent::Text { ref mut text }) = result.content.first_mut() {
         text.push_str("\n\n");
@@ -596,7 +608,12 @@ fn handle_code_tool(
             let new_hash =
                 dtx_code::replace_symbol_body(code, Path::new(path), name_path, new_body, hash)
                     .map_err(err)?;
-            Ok(edit_ok("Symbol body replaced", new_hash))
+            let mut result = edit_ok("Symbol body replaced", new_hash);
+            append_note(
+                &mut result,
+                "Tip: Run get_symbols_overview on this file to verify the edit.",
+            );
+            Ok(result)
         }
         "insert_before_symbol" => {
             let path = args::require_str(a, "path")?;
@@ -683,6 +700,8 @@ fn handle_memory_tool(
     name: &str,
     args: &Option<serde_json::Value>,
 ) -> Result<CallToolResult, ErrorObject> {
+    let mem_err = |e: dtx_memory::MemoryError| ErrorObject::internal_error(e.to_string());
+
     match name {
         "list_memories" => {
             let kind_filter = args
@@ -690,22 +709,58 @@ fn handle_memory_tool(
                 .and_then(|a| a.get("kind"))
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<dtx_memory::MemoryKind>().ok());
+            let name_contains = args
+                .as_ref()
+                .and_then(|a| args::optional_str(a, "name_contains"))
+                .map(String::from);
+            let content_contains = args
+                .as_ref()
+                .and_then(|a| args::optional_str(a, "content_contains"))
+                .map(String::from);
+            let tags = args
+                .as_ref()
+                .map(|a| args::optional_tags(a, "tags"))
+                .unwrap_or_default();
 
-            let mut metas = store
-                .list()
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let has_search =
+                name_contains.is_some() || content_contains.is_some() || !tags.is_empty();
 
-            if let Some(kind) = kind_filter {
-                metas.retain(|m| m.kind == kind);
+            let metas: Vec<dtx_memory::MemoryMeta> = if has_search || kind_filter.is_some() {
+                let mut filter = dtx_memory::MemoryFilter::new();
+                if let Some(kind) = kind_filter {
+                    filter = filter.kind(kind);
+                }
+                if let Some(ref n) = name_contains {
+                    filter = filter.name_contains(n);
+                }
+                if let Some(ref c) = content_contains {
+                    filter = filter.content_contains(c);
+                }
+                for t in &tags {
+                    filter = filter.tag(t);
+                }
+                dtx_memory::search(store, &filter)
+                    .map_err(mem_err)?
+                    .into_iter()
+                    .map(|m| m.meta)
+                    .collect()
+            } else {
+                store.list().map_err(mem_err)?
+            };
+
+            let mut result = CallToolResult::json(&metas);
+            if metas.is_empty() {
+                append_note(
+                    &mut result,
+                    "No memories found. Run onboarding to create initial project context.",
+                );
             }
-            Ok(CallToolResult::json(&metas))
+            Ok(result)
         }
         "read_memory" => {
             let a = args::require(args)?;
             let mem_name = args::require_str(a, "name")?;
-            let memory = store
-                .read(mem_name)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let memory = store.read(mem_name).map_err(mem_err)?;
             Ok(CallToolResult::text(memory.to_file_content()))
         }
         "write_memory" => {
@@ -716,15 +771,8 @@ fn handle_memory_tool(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(dtx_memory::MemoryKind::Project);
             let description = args::optional_str(a, "description").map(String::from);
-            let tags: Vec<String> = a
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let tags = args::optional_tags(a, "tags");
+            let no_tags = tags.is_empty();
 
             let now = chrono::Utc::now();
             let memory = dtx_memory::Memory {
@@ -738,18 +786,18 @@ fn handle_memory_tool(
                 },
                 content: content.to_string(),
             };
-            store
-                .write(&memory)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
-            Ok(CallToolResult::text(format!("Memory '{mem_name}' written")))
+            store.write(&memory).map_err(mem_err)?;
+            let mut result = CallToolResult::text(format!("Memory '{mem_name}' written"));
+            if no_tags {
+                append_note(&mut result, "Tip: Add tags for discoverability (e.g., architecture, convention, pattern, decision).");
+            }
+            Ok(result)
         }
         "edit_memory" => {
             let a = args::require(args)?;
             let mem_name = args::require_str(a, "name")?;
 
-            let mut memory = store
-                .read(mem_name)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            let mut memory = store.read(mem_name).map_err(mem_err)?;
 
             if let Some(content) = args::optional_str(a, "content") {
                 memory.content = content.to_string();
@@ -757,26 +805,245 @@ fn handle_memory_tool(
             if let Some(desc) = args::optional_str(a, "description") {
                 memory.meta.description = Some(desc.to_string());
             }
-            if let Some(tags) = a.get("tags").and_then(|v| v.as_array()) {
-                memory.meta.tags = tags
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
+            let new_tags = args::optional_tags(a, "tags");
+            if !new_tags.is_empty() {
+                memory.meta.tags = new_tags;
             }
             memory.meta.updated_at = chrono::Utc::now();
 
-            store
-                .write(&memory)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            store.write(&memory).map_err(mem_err)?;
             Ok(CallToolResult::text(format!("Memory '{mem_name}' updated")))
         }
         "delete_memory" => {
             let a = args::require(args)?;
             let mem_name = args::require_str(a, "name")?;
-            store
-                .delete(mem_name)
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
+            store.delete(mem_name).map_err(mem_err)?;
             Ok(CallToolResult::text(format!("Memory '{mem_name}' deleted")))
+        }
+        "reflect" => {
+            let metas = store.list().map_err(mem_err)?;
+            if metas.is_empty() {
+                return Ok(CallToolResult::text(
+                    "No memories found. Run onboarding to create initial project context, then write_memory to persist discoveries.",
+                ));
+            }
+
+            let focus = args
+                .as_ref()
+                .and_then(|a| args::optional_str(a, "focus"))
+                .map(|s| s.to_lowercase());
+
+            let filtered: Vec<&dtx_memory::MemoryMeta> = if let Some(ref focus) = focus {
+                metas
+                    .iter()
+                    .filter(|m| {
+                        m.name.to_lowercase().contains(focus)
+                            || m.tags.iter().any(|t| t.to_lowercase().contains(focus))
+                    })
+                    .collect()
+            } else {
+                metas.iter().collect()
+            };
+
+            let total = filtered.len();
+            let large = total > 200;
+
+            // Kind distribution
+            let kind_str = |k: dtx_memory::MemoryKind| -> &'static str {
+                match k {
+                    dtx_memory::MemoryKind::User => "user",
+                    dtx_memory::MemoryKind::Project => "project",
+                    dtx_memory::MemoryKind::Feedback => "feedback",
+                    dtx_memory::MemoryKind::Reference => "reference",
+                }
+            };
+            let mut kind_counts: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for m in &filtered {
+                kind_counts
+                    .entry(kind_str(m.kind))
+                    .or_default()
+                    .push(&m.name);
+            }
+
+            // Tag frequency
+            let mut tag_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            let mut untagged = 0usize;
+            for m in &filtered {
+                if m.tags.is_empty() {
+                    untagged += 1;
+                }
+                for t in &m.tags {
+                    *tag_counts.entry(t.as_str()).or_default() += 1;
+                }
+            }
+            let mut tag_sorted: Vec<_> = tag_counts.into_iter().collect();
+            tag_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Coverage gaps
+            let all_kinds = ["user", "project", "feedback", "reference"];
+            let gap_kinds: Vec<&str> = all_kinds
+                .iter()
+                .filter(|k| !kind_counts.contains_key(*k))
+                .copied()
+                .collect();
+
+            // Staleness (>7 days)
+            let now = chrono::Utc::now();
+            let stale: Vec<&dtx_memory::MemoryMeta> = filtered
+                .iter()
+                .filter(|m| (now - m.updated_at).num_days() > 7)
+                .copied()
+                .collect();
+
+            let kinds_used = kind_counts.len();
+
+            // Build output
+            let mut output = format!(
+                "## Memory Landscape\n\n**{total} memories** across {kinds_used} of 4 kinds\n\n"
+            );
+
+            output.push_str("### Distribution\n");
+            for kind in &all_kinds {
+                if let Some(names) = kind_counts.get(kind) {
+                    let count = names.len();
+                    if large {
+                        output.push_str(&format!("- {kind} ({count})\n"));
+                    } else {
+                        let display: Vec<String> =
+                            names.iter().take(5).map(|n| format!("\"{n}\"")).collect();
+                        let suffix = if names.len() > 5 {
+                            format!(", +{}", names.len() - 5)
+                        } else {
+                            String::new()
+                        };
+                        output.push_str(&format!(
+                            "- {kind} ({count}): {}{suffix}\n",
+                            display.join(", ")
+                        ));
+                    }
+                }
+            }
+            output.push('\n');
+
+            if !gap_kinds.is_empty() {
+                output.push_str("### Coverage Gaps\n");
+                for kind in &gap_kinds {
+                    let hint = match *kind {
+                        "user" => {
+                            "consider saving role/team context with write_memory(kind: \"user\")"
+                        }
+                        "feedback" => {
+                            "capture process preferences with write_memory(kind: \"feedback\")"
+                        }
+                        "project" => "save project context with write_memory(kind: \"project\")",
+                        "reference" => {
+                            "save external resource pointers with write_memory(kind: \"reference\")"
+                        }
+                        _ => "consider adding entries",
+                    };
+                    output.push_str(&format!("- No **{kind}** memories — {hint}\n"));
+                }
+                output.push('\n');
+            }
+
+            if !stale.is_empty() {
+                output.push_str("### Staleness\n");
+                for m in stale.iter().take(10) {
+                    let days = (now - m.updated_at).num_days();
+                    output.push_str(&format!(
+                        "- \"{}\" last updated {days} days ago — may need refresh\n",
+                        m.name
+                    ));
+                }
+                if stale.len() > 10 {
+                    output.push_str(&format!("- +{} more stale entries\n", stale.len() - 10));
+                }
+                output.push('\n');
+            }
+
+            if !tag_sorted.is_empty() || untagged > 0 {
+                output.push_str("### Tags\n");
+                let tag_display: Vec<String> = tag_sorted
+                    .iter()
+                    .take(15)
+                    .map(|(t, c)| format!("{t}({c})"))
+                    .collect();
+                if untagged > 0 {
+                    output.push_str(&format!(
+                        "{}, untagged({untagged})\n\n",
+                        tag_display.join(", ")
+                    ));
+                } else {
+                    output.push_str(&format!("{}\n\n", tag_display.join(", ")));
+                }
+            }
+
+            // Suggested actions
+            output.push_str("### Suggested Actions\n");
+            for kind in &gap_kinds {
+                output.push_str(&format!(
+                    "- write_memory(kind: \"{kind}\") — fill coverage gap\n"
+                ));
+            }
+            for m in stale.iter().take(3) {
+                output.push_str(&format!(
+                    "- read_memory(\"{}\") — review for freshness\n",
+                    m.name
+                ));
+            }
+            if untagged > 0 {
+                output.push_str(
+                    "- edit_memory with tags — improve discoverability of untagged entries\n",
+                );
+            }
+            if output.ends_with("### Suggested Actions\n") {
+                output.push_str(
+                    "- All looking good! Consider checkpoint to save session progress.\n",
+                );
+            }
+
+            if output.len() > 4000 {
+                output.truncate(3950);
+                output.push_str("\n\n[truncated]");
+            }
+
+            Ok(CallToolResult::text(output))
+        }
+        "checkpoint" => {
+            let a = args::require(args)?;
+            let summary = args::require_str(a, "summary")?;
+            let decisions = args::optional_str(a, "decisions").unwrap_or("None recorded");
+            let open_questions = args::optional_str(a, "open_questions").unwrap_or("None");
+            let user_tags = args::optional_tags(a, "tags");
+
+            let now = chrono::Utc::now();
+            let cp_name = format!("checkpoint-{}", now.format("%Y%m%d-%H%M%S"));
+
+            let mut auto_tags = vec!["checkpoint".to_string(), "session".to_string()];
+            for t in &user_tags {
+                if !auto_tags.contains(t) {
+                    auto_tags.push(t.clone());
+                }
+            }
+
+            let desc_preview: String = summary.chars().take(80).collect();
+            let content = format!("## Summary\n{summary}\n\n## Decisions\n{decisions}\n\n## Open Questions\n{open_questions}");
+
+            let memory = dtx_memory::Memory {
+                meta: dtx_memory::MemoryMeta {
+                    name: cp_name.clone(),
+                    kind: dtx_memory::MemoryKind::Project,
+                    description: Some(format!("Session checkpoint: {desc_preview}")),
+                    created_at: now,
+                    updated_at: now,
+                    tags: auto_tags,
+                },
+                content,
+            };
+            store.write(&memory).map_err(mem_err)?;
+            Ok(CallToolResult::text(format!("Checkpoint saved: {cp_name}")))
         }
         _ => Err(ErrorObject::method_not_found(name)),
     }
@@ -1030,6 +1297,16 @@ fn handle_onboarding_tool(
         "initial_instructions" => {
             let instructions = r#"# dtx MCP Tool Guide
 
+## Session Start Checklist
+1. `list_memories` — load existing project context
+2. `read_memory` on relevant entries — understand prior decisions
+3. `onboarding` (if no memories exist) — generate project structure snapshot
+4. `reflect` — synthesize memory landscape, identify gaps
+
+## Session End Checklist
+1. `checkpoint(summary, decisions, open_questions)` — save session progress
+2. `write_memory` for any new conventions, patterns, or architecture decisions discovered
+
 ## When to Use dtx vs Native Tools
 
 **Prefer dtx for:**
@@ -1051,8 +1328,16 @@ fn handle_onboarding_tool(
 4. Use `find_references` / `find_referencing_symbols` for impact analysis
 5. Use `replace_symbol_body` for safe refactoring (name-based, not line-based)
 6. Save architecture decisions and conventions to memory with `write_memory`
+7. Use `reflect` to synthesize findings and identify knowledge gaps
+8. Use `checkpoint` before ending to save session progress for future sessions
 
 ## Tool Categories
+
+### Memory (7 tools)
+- `list_memories` — search by kind, name, content, or tags
+- `read_memory` / `write_memory` / `edit_memory` / `delete_memory` — CRUD
+- `reflect` — synthesize memory landscape with distribution, gaps, and staleness
+- `checkpoint` — save structured session progress (auto-named, auto-tagged)
 
 ### Code Intelligence (13 tools)
 - `get_symbols_overview` — Symbol tree with line ranges
@@ -1063,9 +1348,6 @@ fn handle_onboarding_tool(
 - `rename_symbol` — Cross-file rename with dry_run preview
 - `insert_before_symbol` / `insert_after_symbol` — Name-based insertion
 - `insert_at_line` / `replace_lines` — Line-based editing with content hash locking
-
-### Memory (5 tools)
-- `write_memory` / `read_memory` / `list_memories` / `edit_memory` / `delete_memory`
 
 ### Resource Management (8 tools)
 - `start_resource` / `stop_resource` / `restart_resource` / `get_status` / `list_resources` / `get_logs` / `start_all` / `stop_all`

@@ -129,7 +129,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Start a resource by ID"),
+        .with_description("Start a managed resource by ID. Check status with list_resources first to see current state."),
         Tool::new(
             "stop_resource",
             serde_json::json!({
@@ -171,7 +171,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Get status of a resource"),
+        .with_description("Get detailed status of a resource including state, health, and uptime. Check before starting or stopping."),
         Tool::new(
             "list_resources",
             serde_json::json!({
@@ -179,7 +179,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "properties": {}
             }),
         )
-        .with_description("List all resources"),
+        .with_description("List all managed resources with current state. Use first to discover available resource IDs and their status."),
         Tool::new(
             "get_logs",
             serde_json::json!({
@@ -198,7 +198,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Get recent logs for a resource"),
+        .with_description("Get recent log output for a resource. Default 50 lines. Use to diagnose startup failures or runtime errors."),
         Tool::new(
             "start_all",
             serde_json::json!({
@@ -522,7 +522,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
     ]
 }
 
-/// Get memory management tools (5).
+/// Get memory management tools (5 + 2 meta-cognitive).
 #[cfg(feature = "memory")]
 pub fn dtx_memory_tools() -> Vec<Tool> {
     vec![
@@ -534,11 +534,24 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                     "kind": {
                         "type": "string",
                         "description": "Filter by kind: user, project, feedback, reference"
+                    },
+                    "name_contains": {
+                        "type": "string",
+                        "description": "Filter by name substring"
+                    },
+                    "content_contains": {
+                        "type": "string",
+                        "description": "Filter by content substring"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Filter by tags (match any)"
                     }
                 }
             }),
         )
-        .with_description("List persisted memories. Filter by kind: user, project, feedback, reference. Memories survive across sessions."),
+        .with_description("List memories with optional filters. Filter by kind, name substring, content substring, or tags. Use at session start to load existing project context."),
         Tool::new(
             "read_memory",
             serde_json::json!({
@@ -552,7 +565,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Read a memory's full content by name."),
+        .with_description("Read a memory's full content by name. Use after list_memories to retrieve specific context. Memories persist across sessions."),
         Tool::new(
             "write_memory",
             serde_json::json!({
@@ -611,7 +624,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Update a memory's content, description, or tags. Use to keep persisted context current."),
+        .with_description("Update a memory's content, description, or tags. Prefer over delete and rewrite for incremental updates."),
         Tool::new(
             "delete_memory",
             serde_json::json!({
@@ -626,6 +639,46 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
             }),
         )
         .with_description("Delete a memory by name."),
+        Tool::new(
+            "reflect",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional focus area to narrow analysis"
+                    }
+                }
+            }),
+        )
+        .with_description("Synthesize project memory landscape. Shows distribution by kind, tag frequency, coverage gaps, staleness, and suggested actions. Use after research phases to identify what's known and what's missing."),
+        Tool::new(
+            "checkpoint",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "What was accomplished this session"
+                    },
+                    "decisions": {
+                        "type": "string",
+                        "description": "Key decisions made and their rationale"
+                    },
+                    "open_questions": {
+                        "type": "string",
+                        "description": "Unresolved items for next session"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional tags beyond auto-tags"
+                    }
+                },
+                "required": ["summary"]
+            }),
+        )
+        .with_description("Save structured session checkpoint to memory. Auto-names with timestamp, auto-tags with 'checkpoint' and 'session'. Creates data that reflect can analyze for temporal patterns."),
     ]
 }
 
