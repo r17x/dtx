@@ -173,6 +173,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
             protocol_version: super::types::MCP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities::default(),
             server_info: self.server_info.clone(),
+            instructions: Some("dtx provides symbol-aware code intelligence and cross-session memory. Prefer get_symbols_overview over reading full files — it shows structure with line ranges. Use find_symbol with include_body:true to read specific definitions. Use replace_symbol_body for safe refactoring. Save project context to memory with write_memory.".to_string()),
         })
     }
 
@@ -464,7 +465,7 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
 
             // Onboarding tools (sync I/O — run off async runtime)
             #[cfg(all(feature = "code", feature = "memory"))]
-            "onboarding" | "check_onboarding_performed" | "initial_instructions" => {
+            "onboarding" | "initial_instructions" => {
                 let code = self.require_code()?.clone();
                 let mem = self.require_memory()?.clone();
                 let name = params.name.clone();
@@ -502,7 +503,7 @@ fn truncated_json<T: serde::Serialize>(items: Vec<T>, cap: usize, hint: &str) ->
         let mut result = CallToolResult::json(&truncated);
         append_note(
             &mut result,
-            &format!("Showing {cap} of {total} results. Narrow with {hint} param."),
+            &format!("Showing {cap} of {cap}+ results. Narrow with {hint} param."),
         );
         result
     } else {
@@ -561,13 +562,21 @@ fn handle_code_tool(
         "find_references" => {
             let symbol_name = args::require_str(a, "symbol_name")?;
             let scope = args::optional_str(a, "scope_path").map(Path::new);
-            let refs = dtx_code::find_references(code.root(), symbol_name, scope).map_err(err)?;
+            let refs =
+                dtx_code::find_references(code.root(), symbol_name, scope, Some(REFERENCE_CAP + 1))
+                    .map_err(err)?;
             Ok(truncated_json(refs, REFERENCE_CAP, "scope_path"))
         }
         "find_referencing_symbols" => {
             let symbol_name = args::require_str(a, "symbol_name")?;
             let scope = args::optional_str(a, "scope_path").map(Path::new);
-            let refs = dtx_code::find_referencing_symbols(code, symbol_name, scope).map_err(err)?;
+            let refs = dtx_code::find_referencing_symbols(
+                code,
+                symbol_name,
+                scope,
+                Some(REFERENCE_CAP + 1),
+            )
+            .map_err(err)?;
             Ok(truncated_json(refs, REFERENCE_CAP, "scope_path"))
         }
         "search_pattern" => {
@@ -575,7 +584,8 @@ fn handle_code_tool(
             let glob = args::optional_str(a, "glob");
             let context = args::optional_usize(a, "context_lines").unwrap_or(2);
             let matches =
-                dtx_code::search_pattern(code.root(), pattern, glob, context).map_err(err)?;
+                dtx_code::search_pattern(code.root(), pattern, glob, context, Some(SEARCH_CAP + 1))
+                    .map_err(err)?;
             Ok(truncated_json(matches, SEARCH_CAP, "glob"))
         }
         "replace_symbol_body" => {
@@ -781,10 +791,31 @@ fn handle_onboarding_tool(
 ) -> Result<CallToolResult, ErrorObject> {
     match name {
         "onboarding" => {
+            let force = args
+                .as_ref()
+                .map(|a| args::optional_bool(a, "force", false))
+                .unwrap_or(false);
             let save = args
                 .as_ref()
                 .map(|a| args::optional_bool(a, "save_to_memory", true))
                 .unwrap_or(true);
+
+            // Return cached onboarding if recent and not forced
+            if !force {
+                let metas = memory.list().unwrap_or_default();
+                if let Some(m) = metas.iter().find(|m| m.name == "onboarding") {
+                    let age = chrono::Utc::now() - m.updated_at;
+                    if age.num_hours() < 24 {
+                        if let Ok(mem) = memory.read("onboarding") {
+                            return Ok(CallToolResult::text(format!(
+                                "{}\n\n_Cached from {}. Use force:true to re-run._",
+                                mem.content,
+                                m.updated_at.format("%Y-%m-%d %H:%M UTC")
+                            )));
+                        }
+                    }
+                }
+            }
 
             // Discover project structure
             let files = code.list_files();
@@ -800,6 +831,23 @@ fn handle_onboarding_tool(
             }
             let mut languages: Vec<_> = lang_counts.into_iter().collect();
             languages.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Directory tree (depth 2, dirs only)
+            let tree = match code.list_dir_with_depth(code.root(), true, Some(2)) {
+                Ok(entries) => {
+                    let mut tree_lines = Vec::new();
+                    for e in &entries {
+                        let depth = e.name.matches('/').count();
+                        if depth <= 2 && matches!(e.entry_type, dtx_code::EntryKind::Dir) {
+                            let indent = "  ".repeat(depth);
+                            let display_name = e.name.rsplit('/').next().unwrap_or(&e.name);
+                            tree_lines.push(format!("{indent}{display_name}/"));
+                        }
+                    }
+                    tree_lines.join("\n")
+                }
+                Err(_) => String::from("(unable to list directories)"),
+            };
 
             // Detect build systems and frameworks
             let well_known = [
@@ -825,7 +873,54 @@ fn handle_onboarding_tool(
                 .map(|f| f.to_string())
                 .collect();
 
-            // Detect entry points
+            // Detect workspace members
+            let mut workspace_members = Vec::new();
+            if let Ok(cargo_path) = code.resolve_path(std::path::Path::new("Cargo.toml")) {
+                if let Ok(content) = std::fs::read_to_string(&cargo_path) {
+                    // Parse members from [workspace] section
+                    let mut in_members = false;
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("[") && trimmed != "[workspace]" {
+                            in_members = false;
+                        }
+                        if trimmed.starts_with("members") && trimmed.contains('[') {
+                            in_members = true;
+                        }
+                        if in_members {
+                            // Extract quoted strings like "crates/*" or "crates/dtx-core"
+                            for part in trimmed.split('"') {
+                                let candidate = part.trim().trim_matches(',');
+                                if !candidate.is_empty()
+                                    && (candidate.contains('/') || candidate.contains('*'))
+                                {
+                                    workspace_members.push(candidate.to_string());
+                                }
+                            }
+                        }
+                        if in_members && trimmed.contains(']') && !trimmed.contains('[') {
+                            in_members = false;
+                        }
+                    }
+                }
+            }
+            if let Ok(pkg_path) = code.resolve_path(std::path::Path::new("package.json")) {
+                if let Ok(content) = std::fs::read_to_string(&pkg_path) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(workspaces) =
+                            parsed.get("workspaces").and_then(|w| w.as_array())
+                        {
+                            for ws in workspaces {
+                                if let Some(s) = ws.as_str() {
+                                    workspace_members.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Detect entry points with symbol summaries
             let entry_candidates = [
                 "src/main.rs",
                 "src/lib.rs",
@@ -837,109 +932,143 @@ fn handle_onboarding_tool(
                 "index.js",
                 "index.ts",
             ];
-            let entry_points: Vec<String> = entry_candidates
+            let mut entry_sections = Vec::new();
+            for candidate in &entry_candidates {
+                let p = std::path::Path::new(candidate);
+                if let Ok(overview) = code.get_overview(p, Some(0)) {
+                    let names: Vec<String> = overview
+                        .symbols
+                        .iter()
+                        .take(10)
+                        .map(|s| format!("{} {}", s.kind, s.name))
+                        .collect();
+                    let symbol_summary = if names.is_empty() {
+                        "(no top-level symbols)".to_string()
+                    } else {
+                        names.join(", ")
+                    };
+                    entry_sections.push(format!("- {candidate}: {symbol_summary}"));
+                }
+            }
+
+            // Build project name from root dir
+            let project_name = code
+                .root()
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("project"))
+                .to_string_lossy();
+
+            // Format language stats
+            let lang_stats: Vec<String> = languages
                 .iter()
-                .filter(|f| {
-                    code.resolve_path(std::path::Path::new(f))
-                        .is_ok_and(|p| p.exists())
-                })
-                .map(|f| f.to_string())
+                .take(10)
+                .map(|(ext, count)| format!("{ext} ({count})"))
                 .collect();
 
-            // Build summary
-            let summary = serde_json::json!({
-                "file_count": file_count,
-                "languages": languages.iter().map(|(ext, count)| {
-                    serde_json::json!({"extension": ext, "count": count})
-                }).collect::<Vec<_>>(),
-                "key_files": key_files,
-                "entry_points": entry_points,
-            });
+            // Build structured output
+            let mut output = format!("# Project: {project_name}\n\n");
 
-            // Optionally save to memory
+            output.push_str("## Structure (depth=2)\n```\n");
+            let tree_capped: Vec<&str> = tree.lines().take(60).collect();
+            let tree_total = tree.lines().count();
+            output.push_str(&tree_capped.join("\n"));
+            if tree_total > 60 {
+                output.push_str("\n... (truncated)");
+            }
+            output.push_str("\n```\n\n");
+
+            output.push_str("## Stack\n");
+            output.push_str(&format!("- Languages: {}\n", lang_stats.join(", ")));
+            output.push_str(&format!("- Files: {file_count}\n"));
+            if !key_files.is_empty() {
+                output.push_str(&format!("- Build: {}\n", key_files.join(", ")));
+            }
+            output.push('\n');
+
+            if !workspace_members.is_empty() {
+                output.push_str("## Workspace Members\n");
+                for m in &workspace_members {
+                    output.push_str(&format!("- {m}\n"));
+                }
+                output.push('\n');
+            }
+
+            if !entry_sections.is_empty() {
+                output.push_str("## Entry Points\n");
+                for section in &entry_sections {
+                    output.push_str(&format!("{section}\n"));
+                }
+                output.push('\n');
+            }
+
+            // Cap total output at 4000 chars
+            if output.len() > 4000 {
+                output.truncate(3950);
+                output.push_str("\n\n... (truncated)");
+            }
+
+            // Save to memory (before consuming output)
             if save {
                 let now = chrono::Utc::now();
-                let mem = dtx_memory::Memory {
-                    meta: dtx_memory::MemoryMeta {
-                        name: "onboarding".to_string(),
-                        kind: dtx_memory::MemoryKind::Project,
-                        description: Some("Project onboarding summary".to_string()),
-                        created_at: now,
-                        updated_at: now,
-                        tags: vec!["onboarding".to_string()],
-                    },
-                    content: serde_json::to_string_pretty(&summary).unwrap_or_default(),
-                };
                 memory
-                    .write(&mem)
+                    .write(&dtx_memory::Memory {
+                        meta: dtx_memory::MemoryMeta {
+                            name: "onboarding".to_string(),
+                            kind: dtx_memory::MemoryKind::Project,
+                            description: Some("Project onboarding summary".to_string()),
+                            created_at: now,
+                            updated_at: now,
+                            tags: vec!["onboarding".to_string()],
+                        },
+                        content: output.clone(),
+                    })
                     .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
             }
 
-            Ok(CallToolResult::json(&summary))
-        }
-        "check_onboarding_performed" => {
-            let metas = memory
-                .list()
-                .map_err(|e| ErrorObject::internal_error(e.to_string()))?;
-            let onboarding = metas
-                .iter()
-                .find(|m| m.name == "onboarding" || m.tags.contains(&"onboarding".to_string()));
-            match onboarding {
-                Some(m) => Ok(CallToolResult::json(serde_json::json!({
-                    "performed": true,
-                    "memory_name": m.name,
-                }))),
-                None => Ok(CallToolResult::json(serde_json::json!({
-                    "performed": false,
-                }))),
-            }
+            Ok(CallToolResult::text(output))
         }
         "initial_instructions" => {
             let instructions = r#"# dtx MCP Tool Guide
 
-## Tool Categories
+## When to Use dtx vs Native Tools
 
-### Resource Management (8 tools)
-- `start_resource`, `stop_resource`, `restart_resource` — Lifecycle control by ID
-- `get_status` — Get resource status
-- `list_resources` — List all managed resources
-- `get_logs` — Get resource logs (default: 50 lines)
-- `start_all`, `stop_all` — Batch operations
+**Prefer dtx for:**
+- Understanding file structure → `get_symbols_overview` (shows functions, structs, classes with line ranges without reading full files)
+- Reading specific definitions → `find_symbol` with `include_body:true` (reads one function without loading the whole file)
+- Finding all usages → `find_references` / `find_referencing_symbols` (word-boundary matching, containing symbol context)
+- Editing code → `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol` (name-based, survives line shifts)
+- Cross-session context → `write_memory` / `read_memory` (persists knowledge between conversations)
 
-### Code Intelligence (13 tools)
-- `get_symbols_overview` — Get symbol tree for a file (use `depth` to limit)
-- `find_symbol` — Search by name_path pattern (substring match), optionally include body
-- `find_references` / `find_referencing_symbols` — Find all references with containing symbol context
-- `search_pattern` — Regex search across files with glob filtering
-- `rename_symbol` — Cross-file rename with all references updated
-- `replace_symbol_body` — Replace entire symbol definition
-- `insert_before_symbol` / `insert_after_symbol` — Insert code adjacent to symbols
-- `insert_at_line` — Insert content at a specific line number
-- `replace_lines` — Replace a range of lines
-
-### Navigation (2 tools)
-- `find_file` — Glob pattern file search (e.g., "**/*.rs", "**/test_*")
-- `list_dir` — List directory contents (optionally recursive)
-
-### Memory (5 tools)
-- `list_memories` — List all memories (optional kind filter)
-- `read_memory` — Read memory by name
-- `write_memory` — Create/update memory with kind, description, tags
-- `edit_memory` — Edit memory metadata or content
-- `delete_memory` — Delete a memory
-
-### Onboarding (3 tools)
-- `onboarding` — Auto-discover project structure and save to memory
-- `check_onboarding_performed` — Check if onboarding has been done
-- `initial_instructions` — This help text
+**Native tools are fine for:**
+- Reading a known file path in full
+- Simple directory listing of a known path
 
 ## Recommended Workflow
 
-1. Run `onboarding` first to discover project structure
-2. Use `find_symbol` and `get_symbols_overview` to explore code (prefer over reading full files)
-3. Use `find_references` / `find_referencing_symbols` to understand dependencies
-4. Use symbol-level editing tools for precise modifications
-5. Save important context to memory for future sessions
+1. Run `onboarding` to discover project structure (cached for 24h)
+2. Use `get_symbols_overview` to understand file structure before editing
+3. Use `find_symbol` with `include_body:true` to read specific definitions
+4. Use `find_references` / `find_referencing_symbols` for impact analysis
+5. Use `replace_symbol_body` for safe refactoring (name-based, not line-based)
+6. Save architecture decisions and conventions to memory with `write_memory`
+
+## Tool Categories
+
+### Code Intelligence (13 tools)
+- `get_symbols_overview` — Symbol tree with line ranges
+- `find_symbol` — Find by name path, optionally include source body
+- `find_references` / `find_referencing_symbols` — Cross-workspace reference search (capped at 50)
+- `search_pattern` — Regex search with glob filtering (capped at 30)
+- `replace_symbol_body` — Replace definition by name (safe refactoring)
+- `rename_symbol` — Cross-file rename with dry_run preview
+- `insert_before_symbol` / `insert_after_symbol` — Name-based insertion
+- `insert_at_line` / `replace_lines` — Line-based editing with content hash locking
+
+### Memory (5 tools)
+- `write_memory` / `read_memory` / `list_memories` / `edit_memory` / `delete_memory`
+
+### Resource Management (8 tools)
+- `start_resource` / `stop_resource` / `restart_resource` / `get_status` / `list_resources` / `get_logs` / `start_all` / `stop_all`
 "#;
             Ok(CallToolResult::text(instructions))
         }

@@ -147,6 +147,10 @@ pub struct InitializeResult {
 
     /// Server info.
     pub server_info: ServerInfo,
+
+    /// Instructions for the AI agent on how to use this server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 impl Default for InitializeResult {
@@ -155,6 +159,7 @@ impl Default for InitializeResult {
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             capabilities: ServerCapabilities::default(),
             server_info: ServerInfo::default(),
+            instructions: None,
         }
     }
 }
@@ -179,6 +184,17 @@ mod tests {
         assert!(json.contains("protocolVersion"));
         assert!(json.contains("capabilities"));
         assert!(json.contains("serverInfo"));
+        // instructions is None by default, so should be skipped
+        assert!(!json.contains("instructions"));
+
+        // With instructions set
+        let result_with_instructions = InitializeResult {
+            instructions: Some("test instructions".to_string()),
+            ..Default::default()
+        };
+        let json2 = serde_json::to_string(&result_with_instructions).unwrap();
+        assert!(json2.contains("instructions"));
+        assert!(json2.contains("test instructions"));
     }
 
     #[test]

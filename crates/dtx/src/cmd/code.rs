@@ -48,7 +48,7 @@ pub async fn search(out: &Output, pattern: String, glob: Option<String>) -> Resu
     let root = find_project_root_cwd()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
 
-    let matches = dtx_code::search_pattern(&root, &pattern, glob.as_deref(), 2)
+    let matches = dtx_code::search_pattern(&root, &pattern, glob.as_deref(), 2, None)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     out.step("search")

@@ -23,6 +23,7 @@ pub fn find_references(
     root: &Path,
     symbol_name: &str,
     scope_path: Option<&Path>,
+    cap: Option<usize>,
 ) -> Result<Vec<Reference>> {
     let pattern = Regex::new(&format!(r"\b{}\b", regex::escape(symbol_name)))
         .map_err(|e| CodeError::Parse(e.to_string()))?;
@@ -58,6 +59,9 @@ pub fn find_references(
                     containing_symbol: None,
                     containing_symbol_kind: None,
                 });
+                if cap.is_some_and(|c| refs.len() >= c) {
+                    return Ok(refs);
+                }
             }
         }
     }
@@ -68,8 +72,9 @@ pub fn find_referencing_symbols(
     workspace: &WorkspaceIndex,
     symbol_name: &str,
     scope_path: Option<&Path>,
+    cap: Option<usize>,
 ) -> Result<Vec<Reference>> {
-    let mut refs = find_references(workspace.root(), symbol_name, scope_path)?;
+    let mut refs = find_references(workspace.root(), symbol_name, scope_path, cap)?;
 
     for r in &mut refs {
         if let Ok(entry) = workspace.get_or_parse(&r.file) {

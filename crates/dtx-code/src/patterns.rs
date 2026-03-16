@@ -51,6 +51,14 @@ fn go_symbol_kind(node_kind: &str) -> Option<SymbolKind> {
     }
 }
 
+fn nix_symbol_kind(node_kind: &str) -> Option<SymbolKind> {
+    match node_kind {
+        "binding" => Some(SymbolKind::Variable),
+        "inherit" => Some(SymbolKind::Import),
+        _ => None,
+    }
+}
+
 pub fn symbol_kind_for(lang: SupportLang, node_kind: &str) -> Option<SymbolKind> {
     match lang {
         SupportLang::Rust => rust_symbol_kind(node_kind),
@@ -58,6 +66,7 @@ pub fn symbol_kind_for(lang: SupportLang, node_kind: &str) -> Option<SymbolKind>
         SupportLang::TypeScript | SupportLang::Tsx => typescript_symbol_kind(node_kind),
         SupportLang::JavaScript => typescript_symbol_kind(node_kind),
         SupportLang::Go => go_symbol_kind(node_kind),
+        SupportLang::Nix => nix_symbol_kind(node_kind),
         _ => None,
     }
 }

@@ -70,6 +70,11 @@ fn extract_name<D: Doc>(node: &Node<'_, D>, kind: &SymbolKind) -> String {
         return name_node.text().to_string();
     }
 
+    // Nix bindings use `attrpath` field instead of `name`
+    if let Some(attr_node) = node.field("attrpath") {
+        return attr_node.text().to_string();
+    }
+
     if matches!(kind, SymbolKind::Impl) {
         if let Some(type_node) = node.field("type") {
             return type_node.text().to_string();
@@ -222,6 +227,17 @@ impl Foo {
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name_path, "Foo");
         assert_eq!(symbols[0].children[0].name_path, "Foo/bar");
+    }
+
+    #[test]
+    fn parse_nix_bindings() {
+        let source = r#"{ foo = 42; bar = x: x + 1; baz = { nested = true; }; }"#;
+        let symbols = parse_source(source, SupportLang::Nix);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"), "Expected 'foo' in {names:?}");
+        assert!(names.contains(&"bar"), "Expected 'bar' in {names:?}");
+        assert!(names.contains(&"baz"), "Expected 'baz' in {names:?}");
+        assert!(symbols.iter().all(|s| s.kind == SymbolKind::Variable));
     }
 
     #[test]

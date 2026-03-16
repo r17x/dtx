@@ -239,7 +239,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path"]
             }),
         )
-        .with_description("Get file's symbol table of contents. Start here to understand structure before targeted edits."),
+        .with_description("Get a file's symbol tree (functions, structs, impls, classes) with line ranges. Shows structure without reading the entire file. Use as first step before editing."),
         Tool::new(
             "find_symbol",
             serde_json::json!({
@@ -266,7 +266,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["name_path_pattern"]
             }),
         )
-        .with_description("Find symbols by name pattern. Use with replace_symbol_body to read then edit. Set include_body: true to read source."),
+        .with_description("Find symbols by hierarchical name path (e.g. 'MyStruct/method'). Set include_body:true to read specific definitions without loading whole files."),
         Tool::new(
             "find_references",
             serde_json::json!({
@@ -284,7 +284,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["symbol_name"]
             }),
         )
-        .with_description("Find all references to a symbol name across the workspace."),
+        .with_description("Find all references to a symbol across the workspace with file:line locations and context. Scope to a directory with scope_path. Capped at 50."),
         Tool::new(
             "search_pattern",
             serde_json::json!({
@@ -307,7 +307,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
         )
-        .with_description("Search for regex pattern across workspace files. Returns matching lines with context."),
+        .with_description("Regex search across workspace files with context lines. Capped at 30 results. Always use glob param to narrow scope (e.g. '*.rs')."),
         Tool::new(
             "replace_symbol_body",
             serde_json::json!({
@@ -333,7 +333,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "name_path", "new_body"]
             }),
         )
-        .with_description("Replace a symbol's entire definition. Use find_symbol first to locate target. Pass content_hash to prevent stale edits."),
+        .with_description("Replace a symbol's entire definition by name path. Survives line-number shifts — safer than line-based edits. Use find_symbol first to get current body."),
         Tool::new(
             "insert_before_symbol",
             serde_json::json!({
@@ -359,7 +359,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code before a symbol. Use find_symbol first to locate target."),
+        .with_description("Insert code before a named symbol. Doesn't require line numbers — use when adding code adjacent to a known symbol."),
         Tool::new(
             "insert_after_symbol",
             serde_json::json!({
@@ -385,7 +385,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code after a symbol. Use find_symbol first to locate target."),
+        .with_description("Insert code after a named symbol. Doesn't require line numbers — use when adding code adjacent to a known symbol."),
         Tool::new(
             "insert_at_line",
             serde_json::json!({
@@ -411,7 +411,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "line", "content"]
             }),
         )
-        .with_description("Insert content at a specific line number"),
+        .with_description("Insert content at a specific line number. Uses SHA256 content hash for optimistic locking. Use when symbol-based editing doesn't apply."),
         Tool::new(
             "replace_lines",
             serde_json::json!({
@@ -441,7 +441,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "start_line", "end_line", "new_content"]
             }),
         )
-        .with_description("Replace a range of lines with new content"),
+        .with_description("Replace a range of lines with new content. Uses SHA256 content hash for optimistic locking. Use when symbol-based editing doesn't apply."),
         Tool::new(
             "rename_symbol",
             serde_json::json!({
@@ -468,7 +468,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path", "name_path", "new_name"]
             }),
         )
-        .with_description("Rename a symbol across all files with word-boundary matching. Use dry_run: true to preview changes."),
+        .with_description("Rename a symbol across all files with word-boundary matching. Handles definition + all references. Use dry_run:true to preview changes."),
         Tool::new(
             "find_referencing_symbols",
             serde_json::json!({
@@ -486,7 +486,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["symbol_name"]
             }),
         )
-        .with_description("Find all symbols that reference a given symbol. Use for impact analysis before refactoring."),
+        .with_description("Like find_references but identifies which function/class contains each reference. Use for impact analysis before refactoring. Capped at 50."),
         Tool::new(
             "find_file",
             serde_json::json!({
@@ -500,7 +500,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
         )
-        .with_description("Find files matching a glob pattern in the workspace."),
+        .with_description("Find files by glob pattern. Workspace-aware with gitignore support. Alternative to host's native file search."),
         Tool::new(
             "list_dir",
             serde_json::json!({
@@ -518,7 +518,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 }
             }),
         )
-        .with_description("List directory contents"),
+        .with_description("List directory contents with optional recursion. Respects gitignore. Alternative to host's native directory listing."),
     ]
 }
 
@@ -538,7 +538,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 }
             }),
         )
-        .with_description("List all memories"),
+        .with_description("List persisted memories. Filter by kind: user, project, feedback, reference. Memories survive across sessions."),
         Tool::new(
             "read_memory",
             serde_json::json!({
@@ -552,7 +552,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Read a memory by name"),
+        .with_description("Read a memory's full content by name."),
         Tool::new(
             "write_memory",
             serde_json::json!({
@@ -584,7 +584,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name", "content"]
             }),
         )
-        .with_description("Create or update a memory"),
+        .with_description("Persist knowledge across sessions. Use for: architecture decisions, conventions, project context that shouldn't be re-discovered each time."),
         Tool::new(
             "edit_memory",
             serde_json::json!({
@@ -611,7 +611,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Edit an existing memory's metadata or content"),
+        .with_description("Update a memory's content, description, or tags. Use to keep persisted context current."),
         Tool::new(
             "delete_memory",
             serde_json::json!({
@@ -625,11 +625,11 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Delete a memory"),
+        .with_description("Delete a memory by name."),
     ]
 }
 
-/// Get onboarding tools (3) — requires both code and memory features.
+/// Get onboarding tools (2) — requires both code and memory features.
 #[cfg(all(feature = "code", feature = "memory"))]
 pub fn dtx_onboarding_tools() -> Vec<Tool> {
     vec![
@@ -638,6 +638,11 @@ pub fn dtx_onboarding_tools() -> Vec<Tool> {
             serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force re-run even if cached results exist (default: false)",
+                        "default": false
+                    },
                     "save_to_memory": {
                         "type": "boolean",
                         "description": "Save onboarding results to memory store (default: true)",
@@ -646,15 +651,7 @@ pub fn dtx_onboarding_tools() -> Vec<Tool> {
                 }
             }),
         )
-        .with_description("Discover project structure, languages, frameworks, and entry points"),
-        Tool::new(
-            "check_onboarding_performed",
-            serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        )
-        .with_description("Check if project onboarding has been performed"),
+        .with_description("Analyze project structure: directory tree, languages, frameworks, workspace layout, entry points. Returns cached result if recent (use force:true to re-run). Saves to memory."),
         Tool::new(
             "initial_instructions",
             serde_json::json!({
@@ -662,7 +659,7 @@ pub fn dtx_onboarding_tools() -> Vec<Tool> {
                 "properties": {}
             }),
         )
-        .with_description("Get dtx MCP usage instructions and tool descriptions"),
+        .with_description("Get dtx MCP tool guide with recommended workflow and when to use dtx vs native tools."),
     ]
 }
 

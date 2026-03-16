@@ -46,7 +46,7 @@ pub fn rename_symbol(
     }
     let old_name = &matches[0].symbol.name;
 
-    let refs = find_references(workspace.root(), old_name, None)?;
+    let refs = find_references(workspace.root(), old_name, None, None)?;
     if refs.is_empty() {
         return Ok(RenameResult {
             old_name: old_name.clone(),

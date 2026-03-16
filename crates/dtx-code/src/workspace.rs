@@ -242,12 +242,25 @@ impl WorkspaceIndex {
 
     /// List directory contents.
     pub fn list_dir(&self, path: &Path, recursive: bool) -> Result<Vec<DirEntryInfo>> {
+        self.list_dir_with_depth(path, recursive, None)
+    }
+
+    pub fn list_dir_with_depth(
+        &self,
+        path: &Path,
+        recursive: bool,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<DirEntryInfo>> {
         let abs = self.resolve_path(path)?;
 
         let mut entries = Vec::new();
         if recursive {
             // Use WalkBuilder to respect .gitignore
-            for entry in WalkBuilder::new(&abs).build().flatten() {
+            let mut builder = WalkBuilder::new(&abs);
+            if let Some(depth) = max_depth {
+                builder.max_depth(Some(depth + 1)); // +1 because root counts as depth 0
+            }
+            for entry in builder.build().flatten() {
                 if entry.path() == abs {
                     continue;
                 }
@@ -480,7 +493,8 @@ def standalone_fn():
     #[test]
     fn search_pattern_finds_matches() {
         let (_dir, root) = create_test_workspace();
-        let matches = crate::search::search_pattern(&root, r"standalone", None, 1).expect("search");
+        let matches =
+            crate::search::search_pattern(&root, r"standalone", None, 1, None).expect("search");
         assert!(matches.len() >= 2);
     }
 
@@ -525,7 +539,7 @@ def standalone_fn():
     fn find_references_across_files() {
         let (_dir, root) = create_test_workspace();
         // "self" appears in both Rust and Python files
-        let refs = crate::references::find_references(&root, "self", None).expect("refs");
+        let refs = crate::references::find_references(&root, "self", None, None).expect("refs");
         assert!(!refs.is_empty());
     }
 
@@ -618,7 +632,8 @@ def standalone_fn():
         let (_dir, root) = create_test_workspace();
         let ws = WorkspaceIndex::new(root.clone());
         // "self" appears inside methods - should report containing symbol
-        let refs = crate::references::find_referencing_symbols(&ws, "self", None).expect("refs");
+        let refs =
+            crate::references::find_referencing_symbols(&ws, "self", None, None).expect("refs");
         assert!(!refs.is_empty());
         // At least some references should have containing_symbol set
         let enriched: Vec<_> = refs
