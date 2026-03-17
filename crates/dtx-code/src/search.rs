@@ -19,7 +19,9 @@ pub fn search_pattern(
     pattern: &str,
     glob_filter: Option<&str>,
     context_lines: usize,
+    cap: Option<usize>,
 ) -> Result<Vec<SearchMatch>> {
+    let context_lines = context_lines.min(5);
     let regex = Regex::new(pattern).map_err(|e| CodeError::Parse(e.to_string()))?;
 
     let mut builder = WalkBuilder::new(root);
@@ -55,6 +57,9 @@ pub fn search_pattern(
                     matched_text: m.as_str().to_string(),
                     context: lines[start..end].join("\n"),
                 });
+                if cap.is_some_and(|c| matches.len() >= c) {
+                    return Ok(matches);
+                }
             }
         }
     }

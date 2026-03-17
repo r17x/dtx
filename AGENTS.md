@@ -16,6 +16,8 @@ Single Rust binary providing:
 - Nix-first environment management (flake generation, package discovery, env extraction)
 - MCP server for AI agent integration (JSON-RPC over stdio)
 
+> IMPORTANT `.worktree/dtx-docs` is git worktree referenced to branch `docs` for DOCUMENTATION related (e.g: architecture, design, and etc). create if not exist
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -300,6 +302,8 @@ cargo test -p dtx-core graph  # Pattern match within crate
 - Don't read files in `**/done/` directories (completed phases, archived content)
 - Don't bypass domain types — use `ServiceName`, `Port`, `ShellCommand` instead of raw strings/numbers
 - Don't put process implementations in `dtx-core` — core defines traits, `dtx-process` implements them
+- Don't HARDCODE
+- Don't MVP
 
 ## Phase Tracking
 

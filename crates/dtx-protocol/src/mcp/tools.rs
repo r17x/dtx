@@ -129,7 +129,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Start a resource by ID"),
+        .with_description("Start a managed resource by ID. Check status with list_resources first to see current state."),
         Tool::new(
             "stop_resource",
             serde_json::json!({
@@ -171,7 +171,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Get status of a resource"),
+        .with_description("Get detailed status of a resource including state, health, and uptime. Check before starting or stopping."),
         Tool::new(
             "list_resources",
             serde_json::json!({
@@ -179,7 +179,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "properties": {}
             }),
         )
-        .with_description("List all resources"),
+        .with_description("List all managed resources with current state. Use first to discover available resource IDs and their status."),
         Tool::new(
             "get_logs",
             serde_json::json!({
@@ -198,7 +198,7 @@ pub fn dtx_resource_tools() -> Vec<Tool> {
                 "required": ["id"]
             }),
         )
-        .with_description("Get recent logs for a resource"),
+        .with_description("Get recent log output for a resource. Default 50 lines. Use to diagnose startup failures or runtime errors."),
         Tool::new(
             "start_all",
             serde_json::json!({
@@ -239,7 +239,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["path"]
             }),
         )
-        .with_description("Get symbol overview for a file"),
+        .with_description("Get a file's symbol tree (functions, structs, impls, classes) with line ranges. Shows structure without reading the entire file. Use as first step before editing."),
         Tool::new(
             "find_symbol",
             serde_json::json!({
@@ -266,7 +266,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["name_path_pattern"]
             }),
         )
-        .with_description("Find symbols by name path pattern"),
+        .with_description("Find symbols by hierarchical name path (e.g. 'MyStruct/method'). Set include_body:true to read specific definitions without loading whole files."),
         Tool::new(
             "find_references",
             serde_json::json!({
@@ -284,7 +284,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["symbol_name"]
             }),
         )
-        .with_description("Find all references to a symbol"),
+        .with_description("Find all references to a symbol across the workspace with file:line locations and context. Scope to a directory with scope_path. Capped at 50."),
         Tool::new(
             "search_pattern",
             serde_json::json!({
@@ -307,7 +307,7 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                 "required": ["pattern"]
             }),
         )
-        .with_description("Search for a regex pattern across files"),
+        .with_description("Regex search across workspace files with context lines. Capped at 30 results. Always use glob param to narrow scope (e.g. '*.rs')."),
         Tool::new(
             "replace_symbol_body",
             serde_json::json!({
@@ -324,12 +324,16 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "new_body": {
                         "type": "string",
                         "description": "New source code to replace the symbol body"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "new_body"]
             }),
         )
-        .with_description("Replace a symbol's body with new source code"),
+        .with_description("Replace a symbol's entire definition by name path. Survives line-number shifts — safer than line-based edits. Use find_symbol first to get current body."),
         Tool::new(
             "insert_before_symbol",
             serde_json::json!({
@@ -346,12 +350,16 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "content": {
                         "type": "string",
                         "description": "Source code to insert before the symbol"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code before a symbol"),
+        .with_description("Insert code before a named symbol. Doesn't require line numbers — use when adding code adjacent to a known symbol."),
         Tool::new(
             "insert_after_symbol",
             serde_json::json!({
@@ -368,16 +376,153 @@ pub fn dtx_code_tools() -> Vec<Tool> {
                     "content": {
                         "type": "string",
                         "description": "Source code to insert after the symbol"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
                     }
                 },
                 "required": ["path", "name_path", "content"]
             }),
         )
-        .with_description("Insert code after a symbol"),
+        .with_description("Insert code after a named symbol. Doesn't require line numbers — use when adding code adjacent to a known symbol."),
+        Tool::new(
+            "insert_at_line",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Line number to insert at (1-indexed)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to insert"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
+                    }
+                },
+                "required": ["path", "line", "content"]
+            }),
+        )
+        .with_description("Insert content at a specific line number. Uses SHA256 content hash for optimistic locking. Use when symbol-based editing doesn't apply."),
+        Tool::new(
+            "replace_lines",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Start line (1-indexed, inclusive)"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "End line (1-indexed, inclusive)"
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "Replacement content"
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "SHA256 hash of file content for optimistic locking. If provided, edit fails when file has changed."
+                    }
+                },
+                "required": ["path", "start_line", "end_line", "new_content"]
+            }),
+        )
+        .with_description("Replace a range of lines with new content. Uses SHA256 content hash for optimistic locking. Use when symbol-based editing doesn't apply."),
+        Tool::new(
+            "rename_symbol",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path containing the symbol definition"
+                    },
+                    "name_path": {
+                        "type": "string",
+                        "description": "Symbol name path (e.g. 'MyStruct/my_method')"
+                    },
+                    "new_name": {
+                        "type": "string",
+                        "description": "New name for the symbol"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Preview changes without writing files (default: false)",
+                        "default": false
+                    }
+                },
+                "required": ["path", "name_path", "new_name"]
+            }),
+        )
+        .with_description("Rename a symbol across all files with word-boundary matching. Handles definition + all references. Use dry_run:true to preview changes."),
+        Tool::new(
+            "find_referencing_symbols",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Symbol name to find references for"
+                    },
+                    "scope_path": {
+                        "type": "string",
+                        "description": "Restrict search to this directory"
+                    }
+                },
+                "required": ["symbol_name"]
+            }),
+        )
+        .with_description("Like find_references but identifies which function/class contains each reference. Use for impact analysis before refactoring. Capped at 50."),
+        Tool::new(
+            "find_file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. '*.rs', '**/test_*')"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        )
+        .with_description("Find files by glob pattern. Workspace-aware with gitignore support. Alternative to host's native file search."),
+        Tool::new(
+            "list_dir",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path (default: workspace root)"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "List recursively (default: false)",
+                        "default": false
+                    }
+                }
+            }),
+        )
+        .with_description("List directory contents with optional recursion. Respects gitignore. Alternative to host's native directory listing."),
     ]
 }
 
-/// Get memory management tools (5).
+/// Get memory management tools (5 + 2 meta-cognitive).
 #[cfg(feature = "memory")]
 pub fn dtx_memory_tools() -> Vec<Tool> {
     vec![
@@ -389,11 +534,24 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                     "kind": {
                         "type": "string",
                         "description": "Filter by kind: user, project, feedback, reference"
+                    },
+                    "name_contains": {
+                        "type": "string",
+                        "description": "Filter by name substring"
+                    },
+                    "content_contains": {
+                        "type": "string",
+                        "description": "Filter by content substring"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Filter by tags (match any)"
                     }
                 }
             }),
         )
-        .with_description("List all memories"),
+        .with_description("List memories with optional filters. Filter by kind, name substring, content substring, or tags. Use at session start to load existing project context."),
         Tool::new(
             "read_memory",
             serde_json::json!({
@@ -407,7 +565,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Read a memory by name"),
+        .with_description("Read a memory's full content by name. Use after list_memories to retrieve specific context. Memories persist across sessions."),
         Tool::new(
             "write_memory",
             serde_json::json!({
@@ -439,7 +597,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name", "content"]
             }),
         )
-        .with_description("Create or update a memory"),
+        .with_description("Persist knowledge across sessions. Use for: architecture decisions, conventions, project context that shouldn't be re-discovered each time."),
         Tool::new(
             "edit_memory",
             serde_json::json!({
@@ -466,7 +624,7 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Edit an existing memory's metadata or content"),
+        .with_description("Update a memory's content, description, or tags. Prefer over delete and rewrite for incremental updates."),
         Tool::new(
             "delete_memory",
             serde_json::json!({
@@ -480,11 +638,85 @@ pub fn dtx_memory_tools() -> Vec<Tool> {
                 "required": ["name"]
             }),
         )
-        .with_description("Delete a memory"),
+        .with_description("Delete a memory by name."),
+        Tool::new(
+            "reflect",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "description": "Optional focus area to narrow analysis"
+                    }
+                }
+            }),
+        )
+        .with_description("Synthesize project memory landscape. Shows distribution by kind, tag frequency, coverage gaps, staleness, and suggested actions. Use after research phases to identify what's known and what's missing."),
+        Tool::new(
+            "checkpoint",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "What was accomplished this session"
+                    },
+                    "decisions": {
+                        "type": "string",
+                        "description": "Key decisions made and their rationale"
+                    },
+                    "open_questions": {
+                        "type": "string",
+                        "description": "Unresolved items for next session"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional tags beyond auto-tags"
+                    }
+                },
+                "required": ["summary"]
+            }),
+        )
+        .with_description("Save structured session checkpoint to memory. Auto-names with timestamp, auto-tags with 'checkpoint' and 'session'. Creates data that reflect can analyze for temporal patterns."),
     ]
 }
 
-/// Get all dtx tools (resource + code + memory).
+/// Get onboarding tools (2) — requires both code and memory features.
+#[cfg(all(feature = "code", feature = "memory"))]
+pub fn dtx_onboarding_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "onboarding",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force re-run even if cached results exist (default: false)",
+                        "default": false
+                    },
+                    "save_to_memory": {
+                        "type": "boolean",
+                        "description": "Save onboarding results to memory store (default: true)",
+                        "default": true
+                    }
+                }
+            }),
+        )
+        .with_description("Analyze project structure: directory tree, languages, frameworks, workspace layout, entry points. Returns cached result if recent (use force:true to re-run). Saves to memory."),
+        Tool::new(
+            "initial_instructions",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )
+        .with_description("Get dtx MCP tool guide with recommended workflow and when to use dtx vs native tools."),
+    ]
+}
+
+/// Get all dtx tools (resource + code + memory + onboarding).
 #[allow(unused_mut)]
 pub fn dtx_tools() -> Vec<Tool> {
     let mut tools = dtx_resource_tools();
@@ -494,6 +726,9 @@ pub fn dtx_tools() -> Vec<Tool> {
 
     #[cfg(feature = "memory")]
     tools.extend(dtx_memory_tools());
+
+    #[cfg(all(feature = "code", feature = "memory"))]
+    tools.extend(dtx_onboarding_tools());
 
     tools
 }

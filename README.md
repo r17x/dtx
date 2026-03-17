@@ -128,6 +128,46 @@ dtx web --open
 # - Nix package search
 ```
 
+### MCP Server for AI Agents
+
+dtx includes an MCP (Model Context Protocol) server that gives AI agents symbol-aware code intelligence and cross-session memory.
+
+```bash
+# Start MCP server (stdio JSON-RPC)
+dtx mcp
+```
+
+**Setup** — Add to your `.mcp.json` (Claude Code, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "dtx": {
+      "type": "stdio",
+      "command": "dtx",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+**30 tools** across 4 categories:
+
+| Category | Tools | What they do |
+|----------|-------|-------------|
+| **Code Intelligence** (13) | `get_symbols_overview`, `find_symbol`, `find_references`, `replace_symbol_body`, `rename_symbol`, ... | Symbol-aware navigation and editing that survives line-number shifts |
+| **Memory** (7) | `list_memories`, `read_memory`, `write_memory`, `reflect`, `checkpoint`, ... | Cross-session context persistence with search, aggregation, and structured checkpoints |
+| **Resource Management** (8) | `start_resource`, `stop_resource`, `get_status`, `get_logs`, ... | Control managed services directly from the agent |
+| **Onboarding** (2) | `onboarding`, `initial_instructions` | Project structure discovery and workflow guidance |
+
+**Recommended agent workflow:**
+1. `list_memories` → load existing project context
+2. `onboarding` → discover project structure (if first session)
+3. `get_symbols_overview` → understand files before editing
+4. `replace_symbol_body` → safe name-based refactoring
+5. `checkpoint` → save session progress for next time
+
 ---
 
 ## Feature Status
