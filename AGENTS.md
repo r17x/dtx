@@ -46,6 +46,8 @@ Single Rust binary providing:
 ├─────────────────────────────────────────────────┤
 │  Protocol: JSON-RPC methods + transports         │  dtx-protocol
 ├─────────────────────────────────────────────────┤
+│  Intelligence: Code · Memory · Onboarding        │  dtx-code, dtx-memory
+├─────────────────────────────────────────────────┤
 │  Middleware: Logging · Metrics · Retry · AI      │  dtx-middleware
 ├─────────────────────────────────────────────────┤
 │  Orchestration: Dependency graph · Health · Life │  dtx-process
@@ -73,10 +75,10 @@ pub trait Resource: Send + Sync {
     fn state(&self) -> &ResourceState;       // Pending → Starting → Running → Stopping → Stopped | Failed
     async fn start(&mut self, ctx: &Context) -> ResourceResult<()>;
     async fn stop(&mut self, ctx: &Context) -> ResourceResult<()>;
-    async fn kill(&mut self) -> ResourceResult<()>;
+    async fn kill(&mut self, ctx: &Context) -> ResourceResult<()>;
     async fn restart(&mut self, ctx: &Context) -> ResourceResult<()>;
     async fn health(&self) -> HealthStatus;  // Unknown | Healthy | Unhealthy
-    fn logs(&self) -> Option<&LogStream>;
+    fn logs(&self) -> Option<Box<dyn LogStream>>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -112,6 +114,21 @@ crates/
 │       ├── process/       # Port utilities, preflight checks
 │       ├── translation/   # Translator traits, container config, codebase inference, import/
 │       └── export/        # Exporter trait: Docker Compose, Kubernetes, process-compose
+├── dtx-code/        # Code intelligence (ast-grep based)
+│   └── src/
+│       ├── symbol.rs      # Symbol, SymbolKind, SymbolOverview
+│       ├── workspace.rs   # WorkspaceIndex (file indexing, symbol search)
+│       ├── references.rs  # find_references, find_referencing_symbols
+│       ├── rename.rs      # rename_symbol (cross-file)
+│       ├── edit.rs        # replace_symbol_body, insert_*_symbol, replace_lines
+│       ├── search.rs      # search_pattern (regex with context)
+│       ├── parser.rs      # parse_source (AST parsing)
+│       └── language.rs    # Language detection
+├── dtx-memory/      # Cross-session persistent memory
+│   └── src/
+│       ├── store.rs       # MemoryStore (file-backed CRUD)
+│       ├── types.rs       # Memory, MemoryKind (User, Project, Feedback, Reference)
+│       └── search.rs      # MemoryFilter, search
 ├── dtx-process/     # Resource implementations + orchestrator
 │   └── src/
 │       ├── process.rs     # ProcessResource (implements Resource)
@@ -210,6 +227,8 @@ dtx import <file>                  # Import: process-compose, docker-compose, Pr
 dtx nix {init,envrc,shell,packages} # Nix environment management
 dtx web [-p port] [-o]             # Start web UI (Axum + HTMX)
 dtx mcp [-p path]                  # Start MCP server (stdio JSON-RPC)
+dtx code <subcommand>              # Code intelligence (symbols, references, search)
+dtx memory <subcommand>            # Memory operations (list, read, write, edit, delete)
 dtx completions <shell>            # Generate shell completions
 ```
 
@@ -242,6 +261,8 @@ pub struct AppState {
 | Nix integration | `crates/dtx-core/src/nix/` (client, flake, mappings, ast/, backend/) |
 | Process orchestrator | `crates/dtx-process/src/orchestrator.rs` |
 | MCP integration | `crates/dtx-protocol/src/mcp/` |
+| Code intelligence | `crates/dtx-code/src/` (symbol, workspace, references, rename, edit, search) |
+| Memory store | `crates/dtx-memory/src/` (store, types, search) |
 | Plugin sandbox | `crates/dtx-plugin/src/sandbox/` |
 | TUI | `crates/dtx/src/tui/` (app.rs, ui.rs) |
 | CLI commands | `crates/dtx/src/cmd/` (one file per command) |
@@ -254,7 +275,7 @@ pub struct AppState {
 - Async everywhere (Tokio runtime)
 - Askama compile-time template verification
 - `tracing` for structured logging (never `println!`)
-- Feature gates for optional backends (`native-nix`, `container`, `sandbox`, `dynamic`)
+- Feature gates for optional backends (`native-nix`, `container`, `sandbox`, `dynamic`, `code`, `memory`)
 
 ### Naming
 - Crates: `dtx-*` (kebab-case)

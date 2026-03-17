@@ -1,0 +1,366 @@
+# dtx v2 - Data Pipeline Example
+# ETL pipeline with Kafka streaming and ClickHouse
+
+project:
+  name: data-pipeline
+  description: Streaming ETL pipeline with Kafka and ClickHouse
+
+settings:
+  log_level: info
+  health_check_interval: 5s
+  shutdown_timeout: 120s
+
+server:
+  port: 3000
+  host: 127.0.0.1
+
+middleware:
+  logging:
+    enabled: true
+    level: info
+    format: json
+  metrics:
+    enabled: true
+    endpoint: /metrics
+    port: 9090
+
+health:
+  interval: 10s
+  timeout: 15s
+  retries: 5
+
+restart:
+  policy: on-failure
+  max_retries: 10
+  backoff_initial: 2s
+  backoff_max: 120s
+  backoff_multiplier: 2.0
+
+resources:
+  # =============================================================================
+  # STREAMING: Kafka + Zookeeper
+  # =============================================================================
+
+  zookeeper:
+    kind: process
+    command: |
+      zookeeper-server-start.sh config/zookeeper.properties
+    port: 2181
+    working_dir: ./.dtx/kafka
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx256m -Xms256m"
+    health:
+      tcp: 127.0.0.1:2181
+      initial_delay: 5s
+      interval: 10s
+      timeout: 5s
+    restart: on-failure
+
+  kafka:
+    kind: process
+    command: |
+      kafka-server-start.sh config/server.properties \
+        --override listeners=PLAINTEXT://0.0.0.0:9092 \
+        --override advertised.listeners=PLAINTEXT://localhost:9092 \
+        --override zookeeper.connect=localhost:2181 \
+        --override log.dirs=./.dtx/data/kafka-logs
+    port: 9092
+    working_dir: ./.dtx/kafka
+    depends_on:
+      - zookeeper: healthy
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
+    health:
+      tcp: 127.0.0.1:9092
+      initial_delay: 10s
+      interval: 10s
+      timeout: 5s
+    restart: on-failure
+
+  kafka-init:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      sleep 5
+
+      # Create topics
+      kafka-topics.sh --create --if-not-exists \
+        --bootstrap-server localhost:9092 \
+        --topic raw-events \
+        --partitions 6 \
+        --replication-factor 1
+
+      kafka-topics.sh --create --if-not-exists \
+        --bootstrap-server localhost:9092 \
+        --topic transformed-events \
+        --partitions 6 \
+        --replication-factor 1
+
+      kafka-topics.sh --create --if-not-exists \
+        --bootstrap-server localhost:9092 \
+        --topic dlq-events \
+        --partitions 3 \
+        --replication-factor 1
+
+      echo "Kafka topics created"
+    depends_on:
+      - kafka: healthy
+    restart: no
+
+  kafka-ui:
+    kind: process
+    command: |
+      java -jar kafka-ui.jar \
+        --kafka.clusters[0].name=local \
+        --kafka.clusters[0].bootstrapServers=localhost:9092
+    port: 8081
+    depends_on:
+      - kafka: healthy
+    health:
+      http:
+        path: /
+        port: 8081
+      initial_delay: 10s
+      interval: 15s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # STORAGE: ClickHouse + Redis
+  # =============================================================================
+
+  clickhouse:
+    kind: process
+    command: |
+      clickhouse-server --config-file=./clickhouse/config.xml
+    port: 8123
+    working_dir: .
+    environment:
+      CLICKHOUSE_DATA_DIR: ./.dtx/data/clickhouse
+    health:
+      http:
+        path: /ping
+        port: 8123
+      initial_delay: 10s
+      interval: 10s
+      timeout: 5s
+    restart: on-failure
+
+  clickhouse-init:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      sleep 3
+
+      clickhouse-client --query "
+        CREATE DATABASE IF NOT EXISTS pipeline;
+
+        CREATE TABLE IF NOT EXISTS pipeline.events (
+          event_id UUID DEFAULT generateUUIDv4(),
+          event_type String,
+          timestamp DateTime64(3),
+          data String,
+          source String,
+          processed_at DateTime64(3) DEFAULT now64(3)
+        ) ENGINE = MergeTree()
+        ORDER BY (event_type, timestamp)
+        TTL toDateTime(timestamp) + INTERVAL 90 DAY;
+
+        CREATE MATERIALIZED VIEW IF NOT EXISTS pipeline.events_hourly
+        ENGINE = SummingMergeTree()
+        ORDER BY (event_type, hour)
+        AS SELECT
+          event_type,
+          toStartOfHour(timestamp) AS hour,
+          count() AS count,
+          uniq(source) AS unique_sources
+        FROM pipeline.events
+        GROUP BY event_type, hour;
+      "
+
+      echo "ClickHouse schema initialized"
+    depends_on:
+      - clickhouse: healthy
+    restart: no
+
+  redis:
+    kind: process
+    command: redis-server --port 6379 --dir ./.dtx/data/redis
+    port: 6379
+    health:
+      tcp: 127.0.0.1:6379
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # WORKERS: Ingest → Transform → Enrich
+  # =============================================================================
+
+  ingest-worker:
+    kind: process
+    command: node workers/ingest/index.js
+    working_dir: .
+    depends_on:
+      - kafka-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: production
+      KAFKA_BROKERS: localhost:9092
+      KAFKA_GROUP_ID: ingest-workers
+      KAFKA_TOPIC_OUT: raw-events
+      REDIS_URL: redis://localhost:6379
+      WORKER_ID: "1"
+      BATCH_SIZE: "100"
+      FLUSH_INTERVAL_MS: "5000"
+    restart: on-failure
+
+  transform-worker:
+    kind: process
+    command: node workers/transform/index.js
+    working_dir: .
+    depends_on:
+      - kafka-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: production
+      KAFKA_BROKERS: localhost:9092
+      KAFKA_GROUP_ID: transform-workers
+      KAFKA_TOPIC_IN: raw-events
+      KAFKA_TOPIC_OUT: transformed-events
+      KAFKA_TOPIC_DLQ: dlq-events
+      REDIS_URL: redis://localhost:6379
+      WORKER_ID: "1"
+    restart: on-failure
+
+  enrich-worker:
+    kind: process
+    command: node workers/enrich/index.js
+    working_dir: .
+    depends_on:
+      - kafka-init: completed
+      - clickhouse-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: production
+      KAFKA_BROKERS: localhost:9092
+      KAFKA_GROUP_ID: enrich-workers
+      KAFKA_TOPIC_IN: transformed-events
+      KAFKA_TOPIC_DLQ: dlq-events
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_DATABASE: pipeline
+      REDIS_URL: redis://localhost:6379
+      WORKER_ID: "1"
+      BATCH_SIZE: "500"
+      FLUSH_INTERVAL_MS: "10000"
+    restart: on-failure
+
+  # =============================================================================
+  # API: Query Service
+  # =============================================================================
+
+  api:
+    kind: process
+    command: node api/index.js
+    port: 8080
+    working_dir: .
+    depends_on:
+      - clickhouse-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_DATABASE: pipeline
+      REDIS_URL: redis://localhost:6379
+      CACHE_TTL_SECONDS: "60"
+    health:
+      http:
+        path: /health
+        port: 8080
+      interval: 10s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # MONITORING: Grafana
+  # =============================================================================
+
+  grafana:
+    kind: process
+    command: grafana-server --homepath /usr/share/grafana --config ./grafana/grafana.ini
+    port: 3000
+    working_dir: .
+    depends_on:
+      - clickhouse: healthy
+    environment:
+      GF_PATHS_DATA: ./.dtx/data/grafana
+      GF_PATHS_LOGS: ./.dtx/logs/grafana
+      GF_PATHS_PROVISIONING: ./grafana/provisioning
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    health:
+      http:
+        path: /api/health
+        port: 3000
+      initial_delay: 10s
+      interval: 15s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # SCHEDULER: Batch Jobs
+  # =============================================================================
+
+  scheduler:
+    kind: process
+    command: |
+      #!/bin/bash
+      # Simple cron-like scheduler
+      while true; do
+        current_hour=$(date +%H)
+        current_min=$(date +%M)
+
+        # Daily aggregation at 02:00
+        if [ "$current_hour" = "02" ] && [ "$current_min" = "00" ]; then
+          echo "Running daily aggregation..."
+          node scheduler/jobs/daily-aggregation.js
+        fi
+
+        # Hourly metrics at :00
+        if [ "$current_min" = "00" ]; then
+          echo "Running hourly metrics..."
+          node scheduler/jobs/hourly-metrics.js
+        fi
+
+        sleep 60
+      done
+    working_dir: .
+    depends_on:
+      - clickhouse-init: completed
+      - api: healthy
+    environment:
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_DATABASE: pipeline
+    restart: on-failure
+
+  # =============================================================================
+  # DLQ PROCESSOR: Handle Failed Events
+  # =============================================================================
+
+  dlq-processor:
+    kind: process
+    command: node workers/dlq/index.js
+    working_dir: .
+    depends_on:
+      - kafka-init: completed
+    environment:
+      NODE_ENV: production
+      KAFKA_BROKERS: localhost:9092
+      KAFKA_GROUP_ID: dlq-processors
+      KAFKA_TOPIC_IN: dlq-events
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      ALERT_THRESHOLD: "100"
+    restart: on-failure

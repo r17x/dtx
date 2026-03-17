@@ -1,0 +1,410 @@
+# dtx v2 - SaaS Platform Example
+# Production-like SaaS with reverse proxy, S3 storage, image processing
+
+project:
+  name: saas-platform
+  description: Production-like SaaS platform with full infrastructure
+
+settings:
+  log_level: info
+  health_check_interval: 5s
+  shutdown_timeout: 60s
+
+server:
+  port: 3000
+  host: 127.0.0.1
+
+middleware:
+  logging:
+    enabled: true
+    level: info
+    format: json
+  metrics:
+    enabled: true
+    endpoint: /metrics
+    port: 9090
+
+health:
+  interval: 5s
+  timeout: 10s
+  retries: 3
+
+restart:
+  policy: on-failure
+  max_retries: 5
+  backoff_initial: 1s
+  backoff_max: 60s
+  backoff_multiplier: 2.0
+
+environment:
+  # Shared environment variables
+  ROOT_REPO: ${PWD}
+  SSL_CERT_PATH: ${PWD}/data/certs/cert.pem
+  SSL_KEY_PATH: ${PWD}/data/certs/key.pem
+
+resources:
+  # =============================================================================
+  # SETUP: Initial Dependencies
+  # =============================================================================
+  node_modules:
+    kind: process
+    command: bun install
+    working_dir: .
+    oneshot: true
+    restart: no
+
+  # =============================================================================
+  # REVERSE PROXY: Caddy with TLS
+  # =============================================================================
+  caddy:
+    kind: process
+    command: |
+      caddy run --config - <<EOF
+      {
+        skip_install_trust
+      }
+
+      vault.localhost {
+        reverse_proxy localhost:3001
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+
+      app.localhost {
+        reverse_proxy localhost:3002
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+
+      mail.localhost {
+        reverse_proxy localhost:8025
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+
+      s3.localhost *.s3.localhost {
+        reverse_proxy localhost:3900
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+
+      admin.garage.localhost {
+        reverse_proxy localhost:3903
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+
+      imgproxy.localhost {
+        header Access-Control-Allow-Origin "https://app.localhost"
+        reverse_proxy localhost:8080
+        tls {$SSL_CERT_PATH} {$SSL_KEY_PATH}
+      }
+      EOF
+    port: 443
+    depends_on:
+      - node_modules: completed
+    environment:
+      XDG_DATA_HOME: ${ROOT_REPO}/data/caddy
+      XDG_CONFIG_HOME: ${ROOT_REPO}/data/caddy/config
+    health:
+      tcp: 127.0.0.1:443
+      interval: 5s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # DATABASE: PostgreSQL
+  # =============================================================================
+  postgres:
+    kind: process
+    command: postgres -D ${PGDATA}
+    port: 5432
+    depends_on:
+      - node_modules: completed
+    environment:
+      PGDATA: ${ROOT_REPO}/data/postgres
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: development
+      POSTGRES_DB: saas
+    health:
+      exec: pg_isready -h 127.0.0.1 -p 5432
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    restart: on-failure
+
+  # =============================================================================
+  # CACHE: Redis
+  # =============================================================================
+  redis:
+    kind: process
+    command: redis-server --port 6379 --dir ${ROOT_REPO}/data/redis
+    port: 6379
+    depends_on:
+      - node_modules: completed
+    health:
+      tcp: 127.0.0.1:6379
+      interval: 2s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # OBJECT STORAGE: Garage (S3-compatible)
+  # =============================================================================
+  garage:
+    kind: process
+    command: |
+      #!/bin/bash
+      GARAGE_DATA="$ROOT_REPO/data/garage"
+      mkdir -p "$GARAGE_DATA/data" "$GARAGE_DATA/meta"
+
+      # Generate RPC secret if not exists
+      if [ ! -f "$GARAGE_DATA/rpc_secret" ]; then
+        openssl rand -hex 32 > "$GARAGE_DATA/rpc_secret"
+      fi
+      RPC_SECRET=$(cat "$GARAGE_DATA/rpc_secret")
+
+      # Generate admin token if not exists
+      if [ ! -f "$GARAGE_DATA/admin_token" ]; then
+        openssl rand -hex 32 > "$GARAGE_DATA/admin_token"
+      fi
+      ADMIN_TOKEN=$(cat "$GARAGE_DATA/admin_token")
+
+      # Create garage config
+      cat > "$GARAGE_DATA/garage.toml" <<EOF
+      metadata_dir = "$GARAGE_DATA/meta"
+      data_dir = "$GARAGE_DATA/data"
+      db_engine = "sqlite"
+
+      replication_factor = 1
+
+      rpc_bind_addr = "0.0.0.0:3901"
+      rpc_public_addr = "127.0.0.1:3901"
+      rpc_secret = "$RPC_SECRET"
+
+      [s3_api]
+      s3_region = "garage"
+      api_bind_addr = "0.0.0.0:3900"
+      root_domain = ".s3.localhost"
+
+      [s3_web]
+      bind_addr = "0.0.0.0:3902"
+      root_domain = ".web.garage.localhost"
+
+      [admin]
+      api_bind_addr = "0.0.0.0:3903"
+      admin_token = "$ADMIN_TOKEN"
+      EOF
+
+      export GARAGE_CONFIG_FILE="$GARAGE_DATA/garage.toml"
+      exec garage server
+    port: 3900
+    depends_on:
+      - node_modules: completed
+    health:
+      exec: GARAGE_CONFIG_FILE="$ROOT_REPO/data/garage/garage.toml" garage status
+      initial_delay: 3s
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: on-failure
+
+  # =============================================================================
+  # BOOTSTRAP: Garage Initialization (oneshot)
+  # =============================================================================
+  garage-init:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      export GARAGE_CONFIG_FILE="$ROOT_REPO/data/garage/garage.toml"
+      GARAGE_DATA="$ROOT_REPO/data/garage"
+
+      sleep 2
+
+      # Get node ID
+      NODE_ID=$(garage status 2>/dev/null | grep -oE '[a-f0-9]{16}' | head -1)
+      if [ -z "$NODE_ID" ]; then
+        echo "Failed to get node ID"
+        exit 1
+      fi
+
+      echo "Node ID: $NODE_ID"
+
+      # Check if layout already applied
+      CURRENT_LAYOUT=$(garage layout show 2>/dev/null || true)
+      if echo "$CURRENT_LAYOUT" | grep -q "$NODE_ID"; then
+        echo "Layout already configured"
+      else
+        echo "Assigning layout with 2GB capacity..."
+        garage layout assign "$NODE_ID" -z dc1 -c 2G
+        garage layout apply --version 1 || garage layout apply --version "$(garage layout show | grep -oP 'version \K\d+' | head -1)"
+      fi
+
+      # Create default bucket
+      CURRENT_BUCKET=$(garage bucket list 2>/dev/null || true)
+      if echo "$CURRENT_BUCKET" | grep -q "uploads"; then
+        echo "Bucket 'uploads' already exists"
+      else
+        garage bucket create uploads
+        OUTPUT=$(garage key create uploads-key)
+        KEY_ID=$(echo "$OUTPUT" | grep "Key ID:" | awk -F': ' '{print $2}')
+        SECRET_KEY=$(echo "$OUTPUT" | grep "Secret key:" | awk -F': ' '{print $2}')
+
+        garage bucket allow uploads --read --write --key uploads-key
+        garage bucket website uploads --allow
+
+        # Store credentials for other services
+        echo "$KEY_ID" > "$GARAGE_DATA/key_id"
+        echo "$SECRET_KEY" > "$GARAGE_DATA/secret_key"
+      fi
+
+      echo "Garage initialized!"
+    depends_on:
+      - garage: healthy
+    restart: no
+
+  # =============================================================================
+  # BOOTSTRAP: Database Setup (oneshot)
+  # =============================================================================
+  vault-bootstrap:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      # Initialize vault database schema
+      psql -h localhost -U app -d saas -f ./services/vault/schema.sql || true
+      echo "Vault bootstrap complete"
+    depends_on:
+      - postgres: healthy
+      - node_modules: completed
+    environment:
+      PGPASSWORD: development
+    restart: no
+
+  pg-setup:
+    kind: process
+    oneshot: true
+    command: |
+      #!/bin/bash
+      # Run migrations
+      psql -h localhost -U app -d saas -f ./migrations/001_init.sql || true
+      echo "Database setup complete"
+    depends_on:
+      - vault-bootstrap: completed
+    environment:
+      PGPASSWORD: development
+    restart: no
+
+  # =============================================================================
+  # EMAIL: Mailpit (SMTP testing)
+  # =============================================================================
+  mailpit:
+    kind: process
+    command: mailpit
+    port: 8025
+    depends_on:
+      - node_modules: completed
+    health:
+      http:
+        path: /
+        port: 8025
+      initial_delay: 2s
+      interval: 10s
+      timeout: 2s
+    restart: on-failure
+
+  # =============================================================================
+  # IMAGE PROCESSING: Imgproxy
+  # =============================================================================
+  imgproxy:
+    kind: process
+    command: |
+      #!/bin/bash
+      export IMGPROXY_BIND=":8080"
+      export IMGPROXY_USE_S3="true"
+      export IMGPROXY_S3_ENDPOINT="http://127.0.0.1:3900"
+      export IMGPROXY_S3_REGION="garage"
+
+      # Load S3 credentials from garage-init
+      if [ -f "$ROOT_REPO/data/garage/key_id" ]; then
+        export AWS_ACCESS_KEY_ID=$(cat "$ROOT_REPO/data/garage/key_id")
+        export AWS_SECRET_ACCESS_KEY=$(cat "$ROOT_REPO/data/garage/secret_key")
+      fi
+
+      exec imgproxy
+    port: 8080
+    depends_on:
+      - garage-init: completed
+    health:
+      http:
+        path: /health
+        port: 8080
+      initial_delay: 2s
+      interval: 5s
+      timeout: 2s
+    restart: on-failure
+
+  # =============================================================================
+  # SERVICES: Vault (Authentication)
+  # =============================================================================
+  vault:
+    kind: process
+    command: bun run --filter vault dev
+    port: 3001
+    working_dir: ./services/vault
+    depends_on:
+      - pg-setup: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3001"
+      DATABASE_URL: postgres://app:development@localhost:5432/saas
+      REDIS_URL: redis://localhost:6379
+    health:
+      http:
+        path: /health
+        port: 3001
+      interval: 3s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # SERVICES: App (Main API)
+  # =============================================================================
+  app:
+    kind: process
+    command: bun run --filter app dev
+    port: 3002
+    working_dir: ./services/app
+    depends_on:
+      - vault: healthy
+      - garage-init: completed
+      - redis: healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3002"
+      DATABASE_URL: postgres://app:development@localhost:5432/saas
+      REDIS_URL: redis://localhost:6379
+      VAULT_URL: http://localhost:3001
+      S3_ENDPOINT: http://localhost:3900
+      S3_BUCKET: uploads
+      SMTP_HOST: localhost
+      SMTP_PORT: "1025"
+    health:
+      http:
+        path: /health
+        port: 3002
+      interval: 3s
+      timeout: 5s
+    restart: on-failure
+
+  # =============================================================================
+  # WATCHER: Auto-restart on file changes
+  # =============================================================================
+  watcher:
+    kind: process
+    command: |
+      #!/bin/bash
+      # Watch for config changes and restart app
+      watchexec -w ./services/app/config -w ./services/vault/config \
+        --on-busy-update restart \
+        -- dtx restart app vault
+    depends_on:
+      - app: started
+    restart: on-failure
