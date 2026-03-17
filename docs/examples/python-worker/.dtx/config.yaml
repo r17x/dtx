@@ -1,0 +1,48 @@
+# dtx v2 - Python Worker Example
+# Background job processor with Redis queue
+
+project:
+  name: python-worker
+  description: Python background worker example
+
+settings:
+  log_level: info
+
+health:
+  interval: 5s
+  timeout: 3s
+  retries: 3
+
+restart:
+  policy: on-failure
+  max_retries: 5
+  backoff_initial: 1s
+  backoff_max: 30s
+
+resources:
+  # =============================================================================
+  # QUEUE: Redis
+  # =============================================================================
+  redis:
+    kind: process
+    command: redis-server --port 6379
+    port: 6379
+    health:
+      tcp: 127.0.0.1:6379
+      interval: 2s
+      timeout: 3s
+    restart: on-failure
+
+  # =============================================================================
+  # WORKER: Python Job Processor
+  # =============================================================================
+  worker:
+    kind: process
+    command: python worker.py
+    depends_on:
+      - redis: healthy
+    environment:
+      REDIS_URL: redis://localhost:6379
+      WORKER_ID: "1"
+      LOG_LEVEL: info
+    restart: on-failure
