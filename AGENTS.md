@@ -326,10 +326,6 @@ cargo test -p dtx-core graph  # Pattern match within crate
 - Don't HARDCODE
 - Don't MVP
 
-## Phase Tracking
-
-See `TODO.md` for active phase status.
-
 ## Principle
 
 Code should be self-documenting. If you need a comment to explain WHAT the code does, refactor to make it clearer.

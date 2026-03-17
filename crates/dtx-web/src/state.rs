@@ -3,51 +3,94 @@
 use dtx_core::events::ResourceEventBus;
 use dtx_core::store::ConfigStore;
 use dtx_core::NixClient;
-use dtx_process::ResourceOrchestrator;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::WebConfig;
+use crate::service::{OrchestratorHandle, ServiceOps};
 use crate::sse::ConnectionTracker;
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    /// Configuration store (config.yaml as single source of truth).
-    pub store: Arc<RwLock<ConfigStore>>,
-    /// Nix client for package operations.
-    pub nix_client: Arc<NixClient>,
-    /// Resource orchestrator - optional, set when services are running.
-    pub orchestrator: Arc<RwLock<Option<ResourceOrchestrator>>>,
-    /// SSE connection tracker.
-    pub sse_tracker: Arc<ConnectionTracker>,
-    /// Resource event bus for lifecycle event distribution.
-    pub event_bus: Arc<ResourceEventBus>,
-    /// Server start time for uptime calculation.
-    pub server_started_at: Instant,
-    /// Console logger running flag (prevents duplicate loggers).
-    pub console_logger_running: Arc<AtomicBool>,
-    /// Cancellation token for background tasks.
-    pub shutdown_token: CancellationToken,
+    store: Arc<RwLock<ConfigStore>>,
+    nix_client: Arc<NixClient>,
+    orchestrator_handle: Arc<OrchestratorHandle>,
+    sse_tracker: Arc<ConnectionTracker>,
+    event_bus: Arc<ResourceEventBus>,
+    config: Arc<WebConfig>,
+    server_started_at: Instant,
+    shutdown_token: CancellationToken,
 }
 
 impl AppState {
-    /// Creates a new AppState with the given ConfigStore.
-    pub fn new(store: ConfigStore) -> Self {
+    /// Creates a new AppState with the given ConfigStore and WebConfig.
+    pub fn new(store: ConfigStore, config: WebConfig) -> Self {
         let nix_client = Arc::new(NixClient::new());
+        let event_bus = Arc::new(ResourceEventBus::new());
+        let config = Arc::new(config);
+
+        let orchestrator_handle =
+            Arc::new(OrchestratorHandle::new(event_bus.clone(), config.clone()));
 
         Self {
             store: Arc::new(RwLock::new(store)),
             nix_client,
-            orchestrator: Arc::new(RwLock::new(None)),
-            sse_tracker: Arc::new(ConnectionTracker::new()),
-            event_bus: Arc::new(ResourceEventBus::new()),
+            orchestrator_handle,
+            sse_tracker: ConnectionTracker::new(),
+            event_bus,
+            config,
             server_started_at: Instant::now(),
-            console_logger_running: Arc::new(AtomicBool::new(false)),
             shutdown_token: CancellationToken::new(),
         }
+    }
+
+    // --- Accessor methods ---
+
+    pub fn store(&self) -> &Arc<RwLock<ConfigStore>> {
+        &self.store
+    }
+
+    pub fn nix_client(&self) -> &Arc<NixClient> {
+        &self.nix_client
+    }
+
+    pub fn event_bus(&self) -> &Arc<ResourceEventBus> {
+        &self.event_bus
+    }
+
+    pub fn sse_tracker(&self) -> &Arc<ConnectionTracker> {
+        &self.sse_tracker
+    }
+
+    pub fn config(&self) -> &Arc<WebConfig> {
+        &self.config
+    }
+
+    pub fn shutdown_token(&self) -> &CancellationToken {
+        &self.shutdown_token
+    }
+
+    pub fn server_started_at(&self) -> Instant {
+        self.server_started_at
+    }
+
+    // --- Service constructors ---
+
+    /// Create a ServiceOps instance from the shared state components.
+    pub fn service_ops(&self) -> ServiceOps {
+        ServiceOps::new(
+            self.store.clone(),
+            self.nix_client.clone(),
+            self.event_bus.clone(),
+        )
+    }
+
+    /// Get a reference to the OrchestratorHandle.
+    pub fn orchestrator_handle(&self) -> &Arc<OrchestratorHandle> {
+        &self.orchestrator_handle
     }
 
     /// Returns the server uptime in seconds.

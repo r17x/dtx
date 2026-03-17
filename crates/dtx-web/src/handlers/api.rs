@@ -3,21 +3,25 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
-use dtx_core::config::schema::ResourceConfig;
-use dtx_core::events::{LifecycleEvent, ResourceEventBus};
+use dtx_core::config::schema::DependencyConfig;
+use dtx_core::export::{
+    DockerComposeExporter, ExportFormat, ExportableProject, ExportableService, Exporter,
+    KubernetesExporter, ProcessComposeExporter,
+};
+use dtx_core::graph::DependencyGraph;
 use dtx_core::model::Service as ModelService;
-use dtx_core::process::{analyze_services, run_preflight};
-use dtx_core::resource::{LogStreamKind, Resource, ResourceState};
-use dtx_core::{GraphValidator, ServiceName, ShellCommand};
-use dtx_process::{ProcessResourceConfig, ResourceOrchestrator};
+use dtx_core::resource::{ResourceId, ResourceState};
+use dtx_core::{GraphValidator, ServiceName};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
+use crate::service::ops::{CreateServiceParams, EditableFileType, UpdateServiceParams};
 use crate::state::AppState;
+use crate::types::ProcessResponse;
 
 // === Project ===
 
@@ -31,11 +35,11 @@ pub struct ProjectResponse {
 
 /// Get project metadata.
 pub async fn get_project(State(state): State<AppState>) -> AppResult<Json<ProjectResponse>> {
-    let store = state.store.read().await;
+    let info = state.service_ops().get_project().await?;
     Ok(Json(ProjectResponse {
-        name: store.project_name().to_string(),
-        description: store.project_description().map(|s| s.to_string()),
-        path: store.project_root().display().to_string(),
+        name: info.name,
+        description: info.description,
+        path: info.path,
     }))
 }
 
@@ -54,9 +58,7 @@ pub async fn init_cwd(
     [(axum::http::HeaderName, axum::http::HeaderValue); 1],
     Json<InitCwdResponse>,
 )> {
-    let store = state.store.read().await;
-    let name = store.project_name().to_string();
-    let path = store.project_root().display().to_string();
+    let info = state.service_ops().get_project().await?;
 
     let headers = [(
         axum::http::header::HeaderName::from_static("hx-redirect"),
@@ -66,7 +68,10 @@ pub async fn init_cwd(
     Ok((
         StatusCode::OK,
         headers,
-        Json(InitCwdResponse { name, path }),
+        Json(InitCwdResponse {
+            name: info.name,
+            path: info.path,
+        }),
     ))
 }
 
@@ -74,8 +79,7 @@ pub async fn init_cwd(
 
 /// List all services.
 pub async fn list_services(State(state): State<AppState>) -> AppResult<Json<Vec<ModelService>>> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
+    let services = state.service_ops().list_services().await?;
     Ok(Json(services))
 }
 
@@ -83,7 +87,7 @@ pub async fn list_services(State(state): State<AppState>) -> AppResult<Json<Vec<
 #[derive(Debug, Deserialize)]
 pub struct CreateServiceRequest {
     pub name: ServiceName,
-    pub command: ShellCommand,
+    pub command: String,
     pub package: Option<String>,
     pub port: Option<u16>,
     pub working_dir: Option<String>,
@@ -94,53 +98,14 @@ pub async fn create_service(
     State(state): State<AppState>,
     Json(req): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ModelService>> {
-    // Validate package if provided
-    if let Some(ref pkg) = req.package {
-        if !state
-            .nix_client
-            .validate(pkg)
-            .await
-            .map_err(AppError::from)?
-        {
-            return Err(AppError::bad_request(format!(
-                "Package '{}' not found",
-                pkg
-            )));
-        }
-    }
-
-    let name = req.name.to_string();
-
-    let rc = ResourceConfig {
-        command: Some(req.command.to_string()),
+    let params = CreateServiceParams {
+        name: req.name.to_string(),
+        command: req.command,
+        package: req.package,
         port: req.port,
-        working_dir: req.working_dir.map(PathBuf::from),
-        nix: req
-            .package
-            .as_ref()
-            .map(|pkg| dtx_core::config::schema::NixConfig {
-                packages: vec![pkg.clone()],
-                ..Default::default()
-            }),
-        ..Default::default()
+        working_dir: req.working_dir,
     };
-
-    let mut store = state.store.write().await;
-    store
-        .add_resource(&name, rc.clone())
-        .map_err(AppError::from)?;
-    store.save().map_err(AppError::from)?;
-
-    // Sync flake.nix if service has a package
-    if let Some(ref pkg) = req.package {
-        let project_root = store.project_root().to_path_buf();
-        let project_name = store.project_name().to_string();
-        if let Err(e) = dtx_core::sync_add_package(&project_root, &project_name, pkg) {
-            tracing::warn!("Failed to sync flake.nix: {}", e);
-        }
-    }
-
-    let service = ModelService::from_resource_config(&name, &rc);
+    let (service, _) = state.service_ops().create_service(params).await?;
     Ok(Json(service))
 }
 
@@ -149,11 +114,7 @@ pub async fn get_service(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<ModelService>> {
-    let store = state.store.read().await;
-    let rc = store
-        .get_resource(&name)
-        .ok_or_else(|| AppError::not_found(format!("Service '{}' not found", name)))?;
-    let service = ModelService::from_resource_config(&name, rc);
+    let service = state.service_ops().get_service(&name).await?;
     Ok(Json(service))
 }
 
@@ -161,7 +122,7 @@ pub async fn get_service(
 #[derive(Debug, Deserialize)]
 pub struct UpdateServiceRequest {
     pub name: Option<ServiceName>,
-    pub command: Option<ShellCommand>,
+    pub command: Option<String>,
     pub package: Option<String>,
     pub port: Option<u16>,
     pub working_dir: Option<String>,
@@ -174,92 +135,15 @@ pub async fn update_service(
     Path(name): Path<String>,
     Json(req): Json<UpdateServiceRequest>,
 ) -> AppResult<Json<ModelService>> {
-    // Validate package if changing
-    if let Some(ref pkg) = req.package {
-        if !state
-            .nix_client
-            .validate(pkg)
-            .await
-            .map_err(AppError::from)?
-        {
-            return Err(AppError::bad_request(format!(
-                "Package '{}' not found",
-                pkg
-            )));
-        }
-    }
-
-    let mut store = state.store.write().await;
-
-    let rc = store
-        .get_resource_mut(&name)
-        .ok_or_else(|| AppError::not_found(format!("Service '{}' not found", name)))?;
-
-    let old_package = rc.nix.as_ref().and_then(|n| n.packages.first().cloned());
-
-    if let Some(ref cmd) = req.command {
-        rc.command = Some(cmd.to_string());
-    }
-    if let Some(port) = req.port {
-        rc.port = Some(port);
-    }
-    if let Some(ref wd) = req.working_dir {
-        rc.working_dir = Some(PathBuf::from(wd));
-    }
-    if let Some(enabled) = req.enabled {
-        rc.enabled = enabled;
-    }
-    if let Some(ref pkg) = req.package {
-        rc.nix = Some(dtx_core::config::schema::NixConfig {
-            packages: vec![pkg.clone()],
-            ..Default::default()
-        });
-    }
-
-    let updated_rc = rc.clone();
-    let final_name = if let Some(ref new_name) = req.name {
-        let new_name_str = new_name.to_string();
-        if new_name_str != name {
-            let rc_clone = store.remove_resource(&name).map_err(AppError::from)?;
-            drop(rc_clone);
-            store
-                .add_resource(&new_name_str, updated_rc.clone())
-                .map_err(AppError::from)?;
-        }
-        new_name_str
-    } else {
-        name.clone()
+    let params = UpdateServiceParams {
+        name: req.name.map(|n| n.to_string()),
+        command: req.command,
+        package: req.package,
+        port: req.port,
+        working_dir: req.working_dir,
+        enabled: req.enabled,
     };
-
-    store.save().map_err(AppError::from)?;
-
-    // Sync flake.nix if package changed
-    let new_package = updated_rc
-        .nix
-        .as_ref()
-        .and_then(|n| n.packages.first().cloned());
-    if old_package.as_deref() != new_package.as_deref() {
-        let project_root = store.project_root().to_path_buf();
-        let project_name = store.project_name().to_string();
-
-        if let Some(ref pkg) = new_package {
-            if let Err(e) = dtx_core::sync_add_package(&project_root, &project_name, pkg) {
-                tracing::warn!("Failed to sync flake.nix (add): {}", e);
-            }
-        }
-
-        if let Some(ref pkg) = old_package {
-            let remaining_packages: HashSet<String> = store
-                .list_resources()
-                .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
-                .collect();
-            if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
-                tracing::warn!("Failed to sync flake.nix (remove): {}", e);
-            }
-        }
-    }
-
-    let service = ModelService::from_resource_config(&final_name, &updated_rc);
+    let service = state.service_ops().update_service(&name, params).await?;
     Ok(Json(service))
 }
 
@@ -268,308 +152,36 @@ pub async fn delete_service(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
-    let mut store = state.store.write().await;
-
-    let removed_rc = store.remove_resource(&name).map_err(AppError::from)?;
-    store.save().map_err(AppError::from)?;
-
-    // Sync flake.nix if the removed service had a package
-    let removed_package = removed_rc
-        .nix
-        .as_ref()
-        .and_then(|n| n.packages.first().cloned());
-    if let Some(ref pkg) = removed_package {
-        let project_root = store.project_root().to_path_buf();
-        let remaining_packages: HashSet<String> = store
-            .list_resources()
-            .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
-            .collect();
-        if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
-            tracing::warn!("Failed to sync flake.nix: {}", e);
-        }
-    }
-
+    state.service_ops().delete_service(&name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // === Process Control ===
 
-/// Response for process control operations.
-#[derive(Serialize)]
-pub struct ProcessResponse {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port_reassignments: Option<Vec<PortReassignmentInfo>>,
-}
+/// Start services.
+pub async fn start_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
+    let services = state.service_ops().list_services().await?;
+    let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
 
-/// Information about a port reassignment.
-#[derive(Serialize)]
-pub struct PortReassignmentInfo {
-    pub service: String,
-    pub original_port: u16,
-    pub assigned_port: u16,
-}
-
-/// Convert a ModelService to a ProcessResourceConfig.
-fn service_to_process_config(
-    service: &ModelService,
-    project_root: &std::path::Path,
-) -> ProcessResourceConfig {
-    let mut config = ProcessResourceConfig::new(&service.name, &service.command);
-
-    if let Some(ref wd) = service.working_dir {
-        config = config.with_working_dir(wd.clone());
-    } else {
-        config = config.with_working_dir(project_root);
-    }
-
-    if let Some(ref env) = service.environment {
-        config = config.with_environment(env.clone());
-    }
-
-    if let Some(port) = service.port {
-        config = config.with_port(port);
-    }
-
-    if let Some(ref deps) = service.depends_on {
-        for dep in deps {
-            config = config.depends_on(dep.service.clone());
-        }
-    }
-
-    config
-}
-
-/// Spawns a background task that polls the orchestrator for log collection.
-fn spawn_polling_task(
-    orchestrator: std::sync::Arc<tokio::sync::RwLock<Option<ResourceOrchestrator>>>,
-    shutdown: tokio_util::sync::CancellationToken,
-) {
-    tokio::spawn(async move {
-        let poll_interval = std::time::Duration::from_millis(100);
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(poll_interval) => {
-                    let mut orch = orchestrator.write().await;
-                    match &mut *orch {
-                        Some(o) if o.is_running() => o.poll().await,
-                        _ => break,
-                    }
-                }
-            }
-        }
-        tracing::debug!("Polling task exited");
-    });
-}
-
-/// Spawns a console logging task that subscribes to ResourceEventBus and logs lifecycle events.
-fn spawn_console_logger(
-    event_bus: std::sync::Arc<ResourceEventBus>,
-    running_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    shutdown: tokio_util::sync::CancellationToken,
-) {
-    use std::sync::atomic::Ordering;
-
-    if running_flag.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    let flag = running_flag.clone();
-    tokio::spawn(async move {
-        let mut subscriber = event_bus.subscribe();
-
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                maybe = subscriber.recv() => {
-                    match maybe {
-                        Some(event) => match &event {
-                            LifecycleEvent::Starting { id, .. } => {
-                                tracing::info!(resource = %id, "Resource starting");
-                            }
-                            LifecycleEvent::Running { id, pid, .. } => {
-                                tracing::info!(resource = %id, pid = ?pid, "Resource running");
-                            }
-                            LifecycleEvent::Stopped { id, exit_code, .. } => {
-                                tracing::info!(
-                                    resource = %id,
-                                    exit_code = ?exit_code,
-                                    "Resource stopped"
-                                );
-                            }
-                            LifecycleEvent::Failed { id, error, exit_code, .. } => {
-                                tracing::error!(
-                                    resource = %id,
-                                    exit_code = ?exit_code,
-                                    error = %error,
-                                    "Resource failed"
-                                );
-                            }
-                            LifecycleEvent::Restarting { id, attempt, max_attempts, .. } => {
-                                let max = max_attempts.map(|m| m.to_string()).unwrap_or_else(|| "unlimited".to_string());
-                                tracing::warn!(
-                                    resource = %id,
-                                    attempt = attempt,
-                                    max_attempts = %max,
-                                    "Resource restarting"
-                                );
-                            }
-                            LifecycleEvent::Log { id, stream, line, .. } => {
-                                let line = line.trim_end();
-                                if !line.is_empty() {
-                                    match stream {
-                                        LogStreamKind::Stderr => {
-                                            tracing::error!(resource = %id, "{}", line);
-                                        }
-                                        LogStreamKind::Stdout => {
-                                            tracing::info!(resource = %id, "{}", line);
-                                        }
-                                    }
-                                }
-                            }
-                            LifecycleEvent::HealthCheckPassed { id, .. } => {
-                                tracing::info!(resource = %id, "Health check passed");
-                            }
-                            LifecycleEvent::HealthCheckFailed { id, reason, .. } => {
-                                tracing::warn!(
-                                    resource = %id,
-                                    reason = %reason,
-                                    "Health check failed"
-                                );
-                            }
-                            LifecycleEvent::Stopping { .. }
-                            | LifecycleEvent::DependencyWaiting { .. }
-                            | LifecycleEvent::DependencyResolved { .. }
-                            | LifecycleEvent::ConfigChanged { .. }
-                            | LifecycleEvent::MemoryChanged { .. } => {}
-                        },
-                        None => break,
-                    }
-                }
-            }
-        }
-        flag.store(false, Ordering::SeqCst);
-        tracing::debug!("Console logger exited");
-    });
-}
-
-/// Internal helper: read services from store, create Orchestrator, start services.
-async fn do_start_services(state: &AppState) -> AppResult<Json<ProcessResponse>> {
-    let store = state.store.read().await;
-
-    let services = dtx_core::model::enabled_services_from_config(store.config());
-
-    if services.is_empty() {
-        return Err(AppError::bad_request("No enabled services to start"));
-    }
-
-    // Validate dependency graph before starting
-    if let Err(validation_errors) = GraphValidator::validate_all(&services) {
-        return Err(AppError::bad_request(format!(
-            "Dependency graph validation failed: {}",
-            validation_errors.join("; ")
-        )));
-    }
-
-    // Pre-flight checks
-    let checks = analyze_services(&services);
-    let preflight_result = run_preflight(checks).await;
-
-    if !preflight_result.is_ok() {
-        let errors: Vec<String> = preflight_result
-            .failed
-            .iter()
-            .map(|check| {
-                let mut msg = check.description.clone();
-                if !check.required_by.is_empty() {
-                    msg.push_str(&format!(" (required by: {})", check.required_by.join(", ")));
-                }
-                if let Some(ref hint) = check.fix_hint {
-                    msg.push_str(&format!(" -> {}", hint));
-                }
-                msg
-            })
-            .collect();
-
-        return Err(AppError::bad_request(format!(
-            "Pre-flight checks failed: {}",
-            errors.join("; ")
-        )));
-    }
-
-    // Resolve port conflicts
-    let (services, reassignments) = dtx_core::resolve_port_conflicts(&services);
-
-    for r in &reassignments {
-        tracing::info!(
-            service = %r.service_name,
-            original = r.original_port,
-            assigned = r.new_port,
-            "Port reassigned due to conflict"
-        );
-    }
-
-    // Determine flake directory
+    let store = state.store().read().await;
     let project_root = store.project_root().to_path_buf();
     let project_name = store.project_name().to_string();
-    let dtx_dir = project_root.join(".dtx");
-    let flake_path = project_root.join("flake.nix");
-    let dtx_flake_path = dtx_dir.join("flake.nix");
+    drop(store);
 
-    let _flake_dir = if flake_path.exists() {
-        tracing::info!(path = %flake_path.display(), "Using existing flake.nix");
-        Some(project_root.clone())
-    } else {
-        let flake_content = dtx_core::FlakeGenerator::generate(&services, &project_name);
-        std::fs::create_dir_all(&dtx_dir)
-            .map_err(|e| AppError::internal(format!("Failed to create .dtx dir: {}", e)))?;
-        std::fs::write(&dtx_flake_path, &flake_content)
-            .map_err(|e| AppError::internal(format!("Failed to write flake.nix: {}", e)))?;
-        tracing::info!(path = %dtx_flake_path.display(), "Generated flake.nix");
-        Some(dtx_dir.clone())
-    };
+    let result = state
+        .orchestrator_handle()
+        .start(
+            enabled,
+            &project_root,
+            &project_name,
+            state.shutdown_token(),
+        )
+        .await?;
 
-    // Create ResourceOrchestrator
-    let mut orchestrator = ResourceOrchestrator::new(state.event_bus.clone());
-
-    for svc in &services {
-        let config = service_to_process_config(svc, &project_root);
-        orchestrator.add_resource(config);
-    }
-
-    let result = orchestrator.start_all().await.map_err(AppError::internal)?;
-
-    for (id, error) in &result.failed {
-        tracing::error!(resource = %id, error = %error, "Failed to start resource");
-    }
-
-    // Store orchestrator in state
-    {
-        let mut orch = state.orchestrator.write().await;
-        *orch = Some(orchestrator);
-    }
-
-    spawn_polling_task(state.orchestrator.clone(), state.shutdown_token.clone());
-    spawn_console_logger(
-        state.event_bus.clone(),
-        state.console_logger_running.clone(),
-        state.shutdown_token.clone(),
-    );
-
-    let port_reassignments = if reassignments.is_empty() {
+    let port_reassignments = if result.port_reassignments.is_empty() {
         None
     } else {
-        Some(
-            reassignments
-                .into_iter()
-                .map(|r| PortReassignmentInfo {
-                    service: r.service_name,
-                    original_port: r.original_port,
-                    assigned_port: r.new_port,
-                })
-                .collect(),
-        )
+        Some(result.port_reassignments)
     };
 
     let status = if result.failed.is_empty() {
@@ -578,12 +190,7 @@ async fn do_start_services(state: &AppState) -> AppResult<Json<ProcessResponse>>
         format!(
             "started with {} failures: {}",
             result.failed.len(),
-            result
-                .failed
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            result.failed.join(", ")
         )
     };
 
@@ -593,51 +200,51 @@ async fn do_start_services(state: &AppState) -> AppResult<Json<ProcessResponse>>
     }))
 }
 
-/// Start services.
-pub async fn start_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
-    // Check if already running
-    {
-        let orch = state.orchestrator.read().await;
-        if let Some(ref orchestrator) = *orch {
-            if orchestrator.is_running() {
-                return Err(AppError::conflict("Services already running"));
-            }
-        }
-    }
-
-    do_start_services(&state).await
-}
-
 /// Restart services (stop, regenerate config, start).
 pub async fn restart_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
-    // Stop existing orchestrator if running
-    {
-        let mut orch = state.orchestrator.write().await;
-        if let Some(ref mut orchestrator) = *orch {
-            tracing::info!("Stopping orchestrator for restart");
-            if let Err(e) = orchestrator.stop_all().await {
-                tracing::warn!(?e, "Error stopping orchestrator during restart, continuing");
-            }
-        }
-        *orch = None;
-    }
+    let services = state.service_ops().list_services().await?;
+    let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let store = state.store().read().await;
+    let project_root = store.project_root().to_path_buf();
+    let project_name = store.project_name().to_string();
+    drop(store);
 
-    do_start_services(&state).await
+    let result = state
+        .orchestrator_handle()
+        .restart(
+            enabled,
+            &project_root,
+            &project_name,
+            state.shutdown_token(),
+        )
+        .await?;
+
+    let port_reassignments = if result.port_reassignments.is_empty() {
+        None
+    } else {
+        Some(result.port_reassignments)
+    };
+
+    let status = if result.failed.is_empty() {
+        "started".to_string()
+    } else {
+        format!(
+            "started with {} failures: {}",
+            result.failed.len(),
+            result.failed.join(", ")
+        )
+    };
+
+    Ok(Json(ProcessResponse {
+        status,
+        port_reassignments,
+    }))
 }
 
 /// Stop services.
 pub async fn stop_services(State(state): State<AppState>) -> AppResult<Json<ProcessResponse>> {
-    let mut orch = state.orchestrator.write().await;
-
-    if let Some(ref mut orchestrator) = *orch {
-        orchestrator
-            .stop_all()
-            .await
-            .map_err(|e| AppError::bad_request(e.to_string()))?;
-    }
-    *orch = None;
+    state.orchestrator_handle().stop().await?;
 
     Ok(Json(ProcessResponse {
         status: "stopped".to_string(),
@@ -647,51 +254,52 @@ pub async fn stop_services(State(state): State<AppState>) -> AppResult<Json<Proc
 
 /// Get status of services.
 pub async fn get_status(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
-    let orch = state.orchestrator.read().await;
+    let statuses = state.orchestrator_handle().status().await?;
 
-    let status = if let Some(ref orchestrator) = *orch {
-        if orchestrator.is_running() {
+    let status = match statuses {
+        Some(statuses) => {
             let mut processes = Vec::new();
-            for id in orchestrator.resource_ids() {
-                if let Some(resource) = orchestrator.get_resource(id) {
-                    let proc = resource.read().await;
-                    let state = proc.state();
-                    let (status_str, is_running, pid) = match state {
-                        ResourceState::Pending => ("Pending".to_string(), false, 0),
-                        ResourceState::Starting { .. } => ("Starting".to_string(), false, 0),
-                        ResourceState::Running { pid, .. } => {
-                            ("Running".to_string(), true, pid.unwrap_or(0))
-                        }
-                        ResourceState::Stopping { .. } => ("Stopping".to_string(), true, 0),
-                        ResourceState::Stopped { exit_code, .. } => {
-                            let msg = exit_code
-                                .map(|c| format!("Completed ({})", c))
-                                .unwrap_or_else(|| "Stopped".to_string());
-                            (msg, false, 0)
-                        }
-                        ResourceState::Failed {
-                            exit_code, error, ..
-                        } => {
-                            let msg = exit_code
-                                .map(|c| format!("exit {}", c))
-                                .unwrap_or_else(|| error.clone());
-                            (format!("Failed: {}", msg), false, 0)
-                        }
-                    };
-                    processes.push(serde_json::json!({
-                        "name": id.to_string(),
-                        "status": status_str,
-                        "is_running": is_running,
-                        "pid": pid,
-                    }));
-                }
+            for (id, resource_state) in &statuses {
+                let (status_str, is_running, pid) = match resource_state {
+                    ResourceState::Pending => ("Pending".to_string(), false, 0),
+                    ResourceState::Starting { .. } => ("Starting".to_string(), false, 0),
+                    ResourceState::Running { pid, .. } => {
+                        ("Running".to_string(), true, pid.unwrap_or(0))
+                    }
+                    ResourceState::Stopping { .. } => ("Stopping".to_string(), true, 0),
+                    ResourceState::Stopped { exit_code, .. } => {
+                        let msg = exit_code
+                            .map(|c| format!("Completed ({})", c))
+                            .unwrap_or_else(|| "Stopped".to_string());
+                        (msg, false, 0)
+                    }
+                    ResourceState::Failed {
+                        exit_code, error, ..
+                    } => {
+                        let msg = exit_code
+                            .map(|c| format!("exit {}", c))
+                            .unwrap_or_else(|| error.clone());
+                        (format!("Failed: {}", msg), false, 0)
+                    }
+                };
+                processes.push(serde_json::json!({
+                    "name": id.to_string(),
+                    "status": status_str,
+                    "is_running": is_running,
+                    "pid": pid,
+                }));
             }
-            serde_json::json!({"running": true, "processes": processes})
-        } else {
-            serde_json::json!({"running": false})
+
+            let any_running = statuses.values().any(|s| {
+                matches!(
+                    s,
+                    ResourceState::Running { .. } | ResourceState::Starting { .. }
+                )
+            });
+
+            serde_json::json!({"running": any_running, "processes": processes})
         }
-    } else {
-        serde_json::json!({"running": false})
+        None => serde_json::json!({"running": false}),
     };
 
     Ok(Json(status))
@@ -708,7 +316,7 @@ pub struct SearchQuery {
 }
 
 fn default_limit() -> usize {
-    20
+    crate::config::WebConfig::default().default_search_limit
 }
 
 /// Search for Nix packages.
@@ -716,14 +324,10 @@ pub async fn search_packages(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Vec<dtx_core::Package>>> {
-    let mut packages = state
-        .nix_client
-        .search(&query.q)
-        .await
-        .map_err(AppError::from)?;
-
-    packages.truncate(query.limit);
-
+    let packages = state
+        .service_ops()
+        .nix_search(&query.q, Some(query.limit))
+        .await?;
     Ok(Json(packages))
 }
 
@@ -732,12 +336,7 @@ pub async fn validate_package(
     State(state): State<AppState>,
     Path(package): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let valid = state
-        .nix_client
-        .validate(&package)
-        .await
-        .map_err(AppError::from)?;
-
+    let valid = state.service_ops().nix_validate(&package).await?;
     Ok(Json(
         serde_json::json!({"valid": valid, "package": package}),
     ))
@@ -762,70 +361,35 @@ pub struct NixInitResponse {
 
 /// Get Nix environment status.
 pub async fn get_nix_status(State(state): State<AppState>) -> AppResult<Json<NixStatusResponse>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let has_flake = project_root.join("flake.nix").exists();
-    let has_envrc = project_root.join(".envrc").exists();
-
-    let packages: Vec<String> = store
-        .list_enabled_resources()
-        .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
-        .collect();
-
+    let nix_status = state.service_ops().nix_status().await?;
     Ok(Json(NixStatusResponse {
-        has_flake,
-        has_envrc,
-        packages,
+        has_flake: nix_status.has_flake,
+        has_envrc: nix_status.has_envrc,
+        packages: nix_status.packages,
     }))
 }
 
 /// Initialize Nix environment.
 pub async fn nix_init(State(state): State<AppState>) -> AppResult<Json<NixInitResponse>> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-    let project_root = store.project_root().to_path_buf();
-    let project_name = store.project_name().to_string();
-
-    let flake = dtx_core::FlakeGenerator::generate(&services, &project_name);
-    let envrc = dtx_core::EnvrcGenerator::generate_with_layout(&services);
-
-    std::fs::write(project_root.join("flake.nix"), &flake)
-        .map_err(|e| AppError::bad_request(format!("Failed to write flake.nix: {}", e)))?;
-    std::fs::write(project_root.join(".envrc"), &envrc)
-        .map_err(|e| AppError::bad_request(format!("Failed to write .envrc: {}", e)))?;
-
+    let result = state.service_ops().nix_init().await?;
     Ok(Json(NixInitResponse {
         status: "success".to_string(),
-        files: vec!["flake.nix".to_string(), ".envrc".to_string()],
+        files: result.files,
     }))
 }
 
 /// Regenerate .envrc only.
 pub async fn nix_envrc(State(state): State<AppState>) -> AppResult<Json<NixInitResponse>> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-    let project_root = store.project_root().to_path_buf();
-
-    let envrc = dtx_core::EnvrcGenerator::generate_with_layout(&services);
-
-    std::fs::write(project_root.join(".envrc"), &envrc)
-        .map_err(|e| AppError::bad_request(format!("Failed to write .envrc: {}", e)))?;
-
+    let result = state.service_ops().nix_envrc().await?;
     Ok(Json(NixInitResponse {
         status: "success".to_string(),
-        files: vec![".envrc".to_string()],
+        files: result.files,
     }))
 }
 
 /// Download flake.nix.
 pub async fn download_flake(State(state): State<AppState>) -> AppResult<String> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-    let project_name = store.project_name().to_string();
-
-    let flake = dtx_core::FlakeGenerator::generate(&services, &project_name);
-    Ok(flake)
+    state.service_ops().nix_flake().await
 }
 
 // === Project Config ===
@@ -841,17 +405,10 @@ pub struct ProjectConfigResponse {
 pub async fn get_project_config(
     State(state): State<AppState>,
 ) -> AppResult<Json<ProjectConfigResponse>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let config = dtx_core::ProjectConfig::load(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-    let config_path = dtx_core::ProjectConfig::config_path(&project_root);
-
+    let info = state.service_ops().get_config().await?;
     Ok(Json(ProjectConfigResponse {
-        config,
-        path: config_path.to_string_lossy().to_string(),
+        config: info.config,
+        path: info.path,
     }))
 }
 
@@ -867,23 +424,10 @@ pub async fn add_mapping(
     State(state): State<AppState>,
     Json(req): Json<AddMappingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let mut config = dtx_core::ProjectConfig::load(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-    config.add_mapping(&req.command, &req.package);
-
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-    tracing::info!(
-        command = %req.command,
-        package = %req.package,
-        "Added package mapping"
-    );
+    state
+        .service_ops()
+        .add_mapping(&req.command, &req.package)
+        .await?;
 
     Ok(Json(serde_json::json!({
         "status": "success",
@@ -897,24 +441,10 @@ pub async fn remove_mapping(
     State(state): State<AppState>,
     Path(command): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let mut config = dtx_core::ProjectConfig::load(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-    let removed = config.remove_mapping(&command);
-
-    if removed.is_some() {
-        config
-            .save(&project_root)
-            .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-        tracing::info!(command = %command, "Removed package mapping");
-    }
+    state.service_ops().remove_mapping(&command).await?;
 
     Ok(Json(serde_json::json!({
-        "status": if removed.is_some() { "removed" } else { "not_found" },
+        "status": "removed",
         "command": command
     })))
 }
@@ -932,68 +462,22 @@ pub async fn add_to_command_list(
     State(state): State<AppState>,
     Json(req): Json<AddCommandListRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let mut config = dtx_core::ProjectConfig::load(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
-
+    let ops = state.service_ops();
     match req.list_type.as_str() {
-        "local" => config.add_local(&req.command),
-        "ignore" => config.add_ignore(&req.command),
+        "local" => ops.mark_local(&req.command).await?,
+        "ignore" => ops.mark_ignore(&req.command).await?,
         _ => {
             return Err(AppError::bad_request(
                 "Invalid type, must be 'local' or 'ignore'",
             ))
         }
-    }
-
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    };
 
     Ok(Json(serde_json::json!({
         "status": "success",
         "command": req.command,
         "list": req.list_type
     })))
-}
-
-/// Get package analysis for all services.
-pub async fn get_package_analysis(
-    State(state): State<AppState>,
-) -> AppResult<Json<Vec<ServicePackageInfo>>> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-
-    let analysis = dtx_core::analyze_service_packages(&services);
-
-    let result: Vec<ServicePackageInfo> = analysis
-        .into_iter()
-        .map(|a| {
-            let (status, package, executable) = match a.result {
-                dtx_core::PackageAnalysisResult::Explicit(p) => {
-                    ("explicit".to_string(), Some(p), None)
-                }
-                dtx_core::PackageAnalysisResult::AutoDetected(p) => {
-                    ("auto".to_string(), Some(p), None)
-                }
-                dtx_core::PackageAnalysisResult::LocalBinary => ("local".to_string(), None, None),
-                dtx_core::PackageAnalysisResult::NeedsAttention(e) => {
-                    ("needs_attention".to_string(), None, Some(e))
-                }
-            };
-            ServicePackageInfo {
-                service_name: a.service_name,
-                command: a.command,
-                status,
-                package,
-                executable,
-            }
-        })
-        .collect();
-
-    Ok(Json(result))
 }
 
 /// Package analysis info for a service.
@@ -1006,20 +490,27 @@ pub struct ServicePackageInfo {
     pub executable: Option<String>,
 }
 
-// === Inline File Editing ===
+/// Get package analysis for all services.
+pub async fn get_package_analysis(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<ServicePackageInfo>>> {
+    let analysis = state.service_ops().analyze_packages().await?;
 
-/// Resolves a file type to its path relative to the project.
-fn resolve_file_path(
-    project_path: &std::path::Path,
-    file_type: &str,
-) -> Option<std::path::PathBuf> {
-    match file_type {
-        "config" => Some(project_path.join(".dtx").join("config.yaml")),
-        "flake" => Some(project_path.join("flake.nix")),
-        "mappings" => Some(project_path.join(".dtx").join("mappings.toml")),
-        _ => None,
-    }
+    let result: Vec<ServicePackageInfo> = analysis
+        .into_iter()
+        .map(|a| ServicePackageInfo {
+            service_name: a.service_name,
+            command: a.command,
+            status: a.status,
+            package: a.package,
+            executable: a.executable,
+        })
+        .collect();
+
+    Ok(Json(result))
 }
+
+// === Inline File Editing ===
 
 /// Response for reading a file.
 #[derive(Debug, Serialize)]
@@ -1035,35 +526,14 @@ pub async fn read_file(
     State(state): State<AppState>,
     Path(file_type): Path<String>,
 ) -> AppResult<Json<ReadFileResponse>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-    let project_name = store.project_name().to_string();
-
-    let file_path = resolve_file_path(&project_root, &file_type)
-        .ok_or_else(|| AppError::bad_request(format!("Unknown file type: {}", file_type)))?;
-
-    let (content, exists) = if file_path.exists() {
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| AppError::internal(format!("Failed to read file: {}", e)))?;
-        (content, true)
-    } else {
-        let example = match file_type.as_str() {
-            "config" => dtx_core::ProjectConfig::example(),
-            "mappings" => dtx_core::MappingsConfig::example(),
-            "flake" => {
-                let services = dtx_core::model::services_from_config(store.config());
-                dtx_core::FlakeGenerator::generate(&services, &project_name)
-            }
-            _ => String::new(),
-        };
-        (example, false)
-    };
+    let ft = EditableFileType::parse(&file_type)?;
+    let result = state.service_ops().read_file(ft).await?;
 
     Ok(Json(ReadFileResponse {
         file_type,
-        path: file_path.to_string_lossy().to_string(),
-        content,
-        exists,
+        path: result.path,
+        content: result.content,
+        exists: result.exists,
     }))
 }
 
@@ -1082,25 +552,16 @@ pub struct ValidateFileResponse {
 
 /// Validate file content without saving.
 pub async fn validate_file(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(file_type): Path<String>,
     Json(req): Json<ValidateFileRequest>,
 ) -> AppResult<Json<ValidateFileResponse>> {
-    let result = match file_type.as_str() {
-        "config" => dtx_core::ProjectConfig::parse(&req.content).map(|_| ()),
-        "mappings" => dtx_core::MappingsConfig::parse(&req.content).map(|_| ()),
-        "flake" => dtx_core::nix::ast::validate_flake_nix(&req.content),
-        _ => {
-            return Err(AppError::bad_request(format!(
-                "Unknown file type: {}",
-                file_type
-            )))
-        }
-    };
+    let ft = EditableFileType::parse(&file_type)?;
+    let result = state.service_ops().validate_file(ft, &req.content)?;
 
     Ok(Json(ValidateFileResponse {
-        valid: result.is_ok(),
-        error: result.err(),
+        valid: result.valid,
+        error: result.error,
     }))
 }
 
@@ -1123,54 +584,286 @@ pub async fn save_file(
     Path(file_type): Path<String>,
     Json(req): Json<SaveFileRequest>,
 ) -> AppResult<Json<SaveFileResponse>> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let file_path = resolve_file_path(&project_root, &file_type)
-        .ok_or_else(|| AppError::bad_request(format!("Unknown file type: {}", file_type)))?;
-
-    // Re-validate server-side before writing
-    let validation_error = match file_type.as_str() {
-        "config" => dtx_core::ProjectConfig::parse(&req.content).err(),
-        "mappings" => dtx_core::MappingsConfig::parse(&req.content).err(),
-        "flake" => dtx_core::nix::ast::parse_nix(&req.content)
-            .err()
-            .map(|e| e.to_string()),
-        _ => {
-            return Err(AppError::bad_request(format!(
-                "Unknown file type: {}",
-                file_type
-            )))
-        }
-    };
-
-    if let Some(err) = validation_error {
-        return Err(AppError::bad_request(format!("Validation failed: {}", err)));
-    }
-
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AppError::internal(format!("Failed to create directory: {}", e)))?;
-    }
-
-    std::fs::write(&file_path, &req.content)
-        .map_err(|e| AppError::internal(format!("Failed to write file: {}", e)))?;
-
-    tracing::info!(
-        file_type = %file_type,
-        path = %file_path.display(),
-        "Saved file via inline editor"
-    );
-
-    // Publish config changed event
-    let project_name = store.project_name().to_string();
-    state.event_bus.publish(LifecycleEvent::ConfigChanged {
-        project_id: project_name,
-        timestamp: chrono::Utc::now(),
-    });
+    let ft = EditableFileType::parse(&file_type)?;
+    let saved_path = state.service_ops().save_file(ft, &req.content).await?;
 
     Ok(Json(SaveFileResponse {
         status: "saved".to_string(),
-        path: file_path.to_string_lossy().to_string(),
+        path: saved_path,
+    }))
+}
+
+// === Health ===
+
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    pub resources: HashMap<String, String>,
+}
+
+pub async fn get_health(State(state): State<AppState>) -> AppResult<Json<HealthResponse>> {
+    let mut resources = HashMap::new();
+
+    if let Some(health_map) = state.orchestrator_handle().health().await? {
+        for (id, status) in health_map {
+            resources.insert(id.to_string(), format!("{:?}", status));
+        }
+    }
+
+    Ok(Json(HealthResponse { resources }))
+}
+
+// === Export ===
+
+#[derive(Debug, Deserialize)]
+pub struct ExportParams {
+    #[serde(default = "default_export_format")]
+    pub format: String,
+}
+
+fn default_export_format() -> String {
+    "process-compose".to_string()
+}
+
+fn build_exportable_project(services: &[ModelService], project_name: &str) -> ExportableProject {
+    let exportable_services: Vec<ExportableService> = services
+        .iter()
+        .map(|svc| {
+            let mut es = ExportableService::new(ResourceId::new(&svc.name), &svc.name)
+                .with_enabled(svc.enabled);
+            es = es.with_command(&svc.command);
+            if let Some(ref wd) = svc.working_dir {
+                es = es.with_working_dir(wd.clone());
+            }
+            if let Some(port) = svc.port {
+                es = es.with_port(port);
+            }
+            if let Some(ref env) = svc.environment {
+                for (k, v) in env {
+                    es = es.with_env(k, v);
+                }
+            }
+            if let Some(ref deps) = svc.depends_on {
+                for dep in deps {
+                    es = es.depends_on(ResourceId::new(&dep.service));
+                }
+            }
+            es
+        })
+        .collect();
+
+    ExportableProject::new(project_name).with_services(exportable_services)
+}
+
+pub async fn export_config(
+    State(state): State<AppState>,
+    Query(params): Query<ExportParams>,
+) -> AppResult<impl IntoResponse> {
+    let format: ExportFormat = params
+        .format
+        .parse()
+        .map_err(|e: dtx_core::ExportError| AppError::bad_request(e.to_string()))?;
+
+    let store = state.store().read().await;
+    let services = dtx_core::model::services_from_config(store.config());
+    let project_name = store.project_name().to_string();
+
+    let project = build_exportable_project(&services, &project_name);
+
+    let content = match format {
+        ExportFormat::ProcessCompose => ProcessComposeExporter::new()
+            .export(&project)
+            .map_err(|e| AppError::internal(e.to_string()))?,
+        ExportFormat::DockerCompose => DockerComposeExporter::new()
+            .export(&project)
+            .map_err(|e| AppError::internal(e.to_string()))?,
+        ExportFormat::Kubernetes => KubernetesExporter::new()
+            .export(&project)
+            .map_err(|e| AppError::internal(e.to_string()))?,
+        ExportFormat::Dtx => {
+            let config_path = store.project_root().join(".dtx").join("config.yaml");
+            drop(store);
+            tokio::fs::read_to_string(&config_path)
+                .await
+                .map_err(|e| AppError::internal(format!("Failed to read config.yaml: {}", e)))?
+        }
+    };
+
+    let content_type = "text/yaml; charset=utf-8";
+    let filename = format.default_filename();
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
+        ],
+        content,
+    ))
+}
+
+// === Import ===
+
+#[derive(Debug, Deserialize)]
+pub struct ImportRequest {
+    pub content: String,
+    #[serde(default = "default_import_format")]
+    pub format: String,
+}
+
+fn default_import_format() -> String {
+    "auto".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportResponse {
+    pub imported: usize,
+    pub warnings: Vec<String>,
+    pub services: Vec<String>,
+}
+
+pub async fn import_config(
+    State(state): State<AppState>,
+    Json(req): Json<ImportRequest>,
+) -> AppResult<Json<ImportResponse>> {
+    let result = state
+        .service_ops()
+        .import_config(&req.content, &req.format)
+        .await?;
+
+    Ok(Json(ImportResponse {
+        imported: result.imported,
+        warnings: result.warnings,
+        services: result.service_names,
+    }))
+}
+
+// === Dependency Graph ===
+
+#[derive(Debug, Serialize)]
+pub struct GraphNodeResponse {
+    pub id: String,
+    pub depth: usize,
+    pub dependencies: Vec<String>,
+    pub dependents: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphEdgeResponse {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphResponse {
+    pub nodes: Vec<GraphNodeResponse>,
+    pub edges: Vec<GraphEdgeResponse>,
+    pub roots: Vec<String>,
+    pub max_depth: usize,
+}
+
+pub async fn get_dependency_graph(State(state): State<AppState>) -> AppResult<Json<GraphResponse>> {
+    let store = state.store().read().await;
+    let services = dtx_core::model::services_from_config(store.config());
+    let graph = DependencyGraph::from_services(&services);
+
+    let nodes: Vec<GraphNodeResponse> = graph
+        .nodes
+        .values()
+        .map(|node| GraphNodeResponse {
+            id: node.name.clone(),
+            depth: node.depth,
+            dependencies: node.dependencies.clone(),
+            dependents: node.dependents.clone(),
+        })
+        .collect();
+
+    let mut edges = Vec::new();
+    for node in graph.nodes.values() {
+        for dep in &node.dependencies {
+            edges.push(GraphEdgeResponse {
+                source: node.name.clone(),
+                target: dep.clone(),
+            });
+        }
+    }
+
+    Ok(Json(GraphResponse {
+        nodes,
+        edges,
+        roots: graph.roots,
+        max_depth: graph.max_depth,
+    }))
+}
+
+// === Update Dependencies ===
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDepsRequest {
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateDepsResponse {
+    pub status: String,
+    pub service: String,
+    pub depends_on: Vec<String>,
+}
+
+pub async fn update_dependencies(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateDepsRequest>,
+) -> AppResult<Json<UpdateDepsResponse>> {
+    let mut store = state.store().write().await;
+
+    if store.get_resource(&name).is_none() {
+        return Err(AppError::not_found(format!("Service '{}' not found", name)));
+    }
+
+    let mut services = dtx_core::model::services_from_config(store.config());
+    if let Some(svc) = services.iter_mut().find(|s| s.name == name) {
+        svc.depends_on = if req.depends_on.is_empty() {
+            None
+        } else {
+            Some(
+                req.depends_on
+                    .iter()
+                    .map(|d| dtx_core::model::Dependency {
+                        service: d.clone(),
+                        condition: dtx_core::model::DependencyCondition::ProcessStarted,
+                    })
+                    .collect(),
+            )
+        };
+    }
+
+    if let Err(errors) = GraphValidator::validate_all(&services) {
+        return Err(AppError::bad_request(format!(
+            "Dependency validation failed: {}",
+            errors.join("; ")
+        )));
+    }
+
+    let rc = store
+        .get_resource_mut(&name)
+        .ok_or_else(|| AppError::not_found(format!("Service '{}' not found", name)))?;
+
+    rc.depends_on = req
+        .depends_on
+        .iter()
+        .map(|d| DependencyConfig::Simple(d.clone()))
+        .collect();
+
+    store.save().map_err(AppError::from)?;
+
+    tracing::info!(service = %name, deps = ?req.depends_on, "Updated service dependencies");
+
+    Ok(Json(UpdateDepsResponse {
+        status: "updated".to_string(),
+        service: name,
+        depends_on: req.depends_on,
     }))
 }

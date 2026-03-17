@@ -27,6 +27,7 @@ askama_axum = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+indexmap = { workspace = true }
 rust-embed = "8"
 mime_guess = "2"
 

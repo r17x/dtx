@@ -4,41 +4,28 @@ use axum::{
     extract::{Path, State},
     response::sse::{Event, Sse},
 };
-use dtx_core::events::{EventFilter, LifecycleEvent};
+use dtx_core::events::EventFilter;
 use dtx_core::resource::ResourceState;
 use futures::stream::Stream;
 use std::convert::Infallible;
-use std::time::Duration;
 
-use crate::sse::{event, KEEPALIVE_INTERVAL};
+use crate::sse::{event, lifecycle_to_log_entry};
 use crate::state::AppState;
-
-/// Status update event data
-#[derive(serde::Serialize)]
-struct StatusUpdate {
-    running: bool,
-    services: Vec<ServiceStatus>,
-    timestamp: String,
-}
-
-/// Service status information
-#[derive(serde::Serialize)]
-struct ServiceStatus {
-    name: String,
-    status: String,
-    is_running: bool,
-    pid: u32,
-    restarts: u32,
-}
+use crate::types::{LogEntry, ServiceStatus, StatusUpdate};
 
 pub async fn status_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let _guard = state.sse_tracker.connect();
-    let shutdown_token = state.shutdown_token.clone();
+    let guard = state.sse_tracker().connect();
+    let shutdown_token = state.shutdown_token().clone();
+    let config = state.config().clone();
+    let keepalive_interval = config.sse_keepalive_interval;
+
+    let orchestrator_handle = state.orchestrator_handle().clone();
 
     let stream = async_stream::stream! {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let _guard = guard;
+        let mut interval = tokio::time::interval(config.status_poll_interval);
 
         loop {
             tokio::select! {
@@ -53,48 +40,52 @@ pub async fn status_stream(
             }
 
             let update = {
-                let orch_guard = state.orchestrator.read().await;
+                let statuses = orchestrator_handle.status().await.ok().flatten();
 
-                if let Some(ref orchestrator) = *orch_guard {
-                    let mut services = Vec::new();
-                    let statuses = orchestrator.status().await;
+                match statuses {
+                    Some(statuses) => {
+                        let mut services = Vec::new();
+                        for (id, resource_state) in &statuses {
+                            let (status, is_running, pid) = match resource_state {
+                                ResourceState::Pending => ("Pending".to_string(), false, 0),
+                                ResourceState::Starting { .. } => ("Starting".to_string(), false, 0),
+                                ResourceState::Running { pid, .. } => {
+                                    ("Running".to_string(), true, pid.unwrap_or(0))
+                                }
+                                ResourceState::Stopping { .. } => ("Stopping".to_string(), false, 0),
+                                ResourceState::Stopped { exit_code, .. } => {
+                                    let code = exit_code.unwrap_or(0);
+                                    (format!("Stopped ({})", code), false, 0)
+                                }
+                                ResourceState::Failed { error, exit_code, .. } => {
+                                    let code_str = exit_code.map(|c| format!(" ({})", c)).unwrap_or_default();
+                                    (format!("Failed: {}{}", error, code_str), false, 0)
+                                }
+                            };
+                            services.push(ServiceStatus {
+                                name: id.to_string(),
+                                status,
+                                is_running,
+                                pid,
+                                restarts: 0,
+                            });
+                        }
 
-                    for (id, resource_state) in &statuses {
-                        let (status, is_running, pid) = match resource_state {
-                            ResourceState::Pending => ("Pending".to_string(), false, 0),
-                            ResourceState::Starting { .. } => ("Starting".to_string(), false, 0),
-                            ResourceState::Running { pid, .. } => {
-                                ("Running".to_string(), true, pid.unwrap_or(0))
-                            }
-                            ResourceState::Stopping { .. } => ("Stopping".to_string(), false, 0),
-                            ResourceState::Stopped { exit_code, .. } => {
-                                let code = exit_code.unwrap_or(0);
-                                (format!("Stopped ({})", code), false, 0)
-                            }
-                            ResourceState::Failed { error, exit_code, .. } => {
-                                let code_str = exit_code.map(|c| format!(" ({})", c)).unwrap_or_default();
-                                (format!("Failed: {}{}", error, code_str), false, 0)
-                            }
-                        };
-                        services.push(ServiceStatus {
-                            name: id.to_string(),
-                            status,
-                            is_running,
-                            pid,
-                            restarts: 0,
+                        let any_running = statuses.values().any(|s| {
+                            matches!(s, ResourceState::Running { .. } | ResourceState::Starting { .. })
                         });
+
+                        StatusUpdate {
+                            running: any_running,
+                            services,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        }
                     }
-                    StatusUpdate {
-                        running: orchestrator.is_running(),
-                        services,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    }
-                } else {
-                    StatusUpdate {
+                    None => StatusUpdate {
                         running: false,
                         services: vec![],
                         timestamp: chrono::Utc::now().to_rfc3339(),
-                    }
+                    },
                 }
             };
 
@@ -104,18 +95,9 @@ pub async fn status_stream(
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
-            .interval(KEEPALIVE_INTERVAL)
+            .interval(keepalive_interval)
             .text("keepalive"),
     )
-}
-
-/// Log entry for SSE
-#[derive(serde::Serialize)]
-struct LogEntry {
-    service: String,
-    message: String,
-    timestamp: String,
-    level: String,
 }
 
 /// Stream logs for a specific service via ResourceEventBus subscription.
@@ -123,15 +105,19 @@ pub async fn logs_stream(
     State(state): State<AppState>,
     Path(service): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let _guard = state.sse_tracker.connect();
-    let shutdown_token = state.shutdown_token.clone();
+    let guard = state.sse_tracker().connect();
+    let shutdown_token = state.shutdown_token().clone();
+    let config = state.config().clone();
+    let keepalive_interval = config.sse_keepalive_interval;
 
     let filter = EventFilter::new().resource(service.as_str()).with_logs();
-    let mut subscriber = state.event_bus.subscribe_filtered(filter.clone());
+    let mut subscriber = state.event_bus().subscribe_filtered(filter.clone());
 
-    let buffered = state.event_bus.replay(&filter);
+    let buffered = state.event_bus().replay(&filter);
 
     let stream = async_stream::stream! {
+        let _guard = guard;
+
         yield event(
             "info",
             serde_json::json!({
@@ -142,12 +128,12 @@ pub async fn logs_stream(
 
         // Replay buffered events
         for lifecycle_event in &buffered {
-            if let LifecycleEvent::Log { id, line, timestamp, .. } = lifecycle_event {
+            if let Some(entry) = lifecycle_to_log_entry(lifecycle_event) {
                 yield event("log", &LogEntry {
-                    service: id.to_string(),
-                    message: line.clone(),
-                    timestamp: timestamp.to_rfc3339(),
-                    level: "info".to_string(),
+                    service: entry.service,
+                    message: entry.message,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    level: entry.level,
                 });
             }
         }
@@ -165,71 +151,19 @@ pub async fn logs_stream(
                 maybe_event = subscriber.recv() => {
                     match maybe_event {
                         Some(lifecycle_event) => {
-                            match &lifecycle_event {
-                                LifecycleEvent::Log { id, line, timestamp, stream } => {
-                                    let level = match stream {
-                                        dtx_core::resource::LogStreamKind::Stderr => "error",
-                                        _ => "info",
-                                    };
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: line.clone(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: level.to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Starting { id, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: "Service starting".to_string(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Running { id, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: "Service running".to_string(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Stopped { id, exit_code, timestamp, .. } => {
-                                    let msg = match exit_code {
-                                        Some(code) => format!("Service stopped (exit code: {})", code),
-                                        None => "Service stopped".to_string(),
-                                    };
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: msg,
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Failed { id, error, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: format!("Service failed: {}", error),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "error".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Restarting { id, attempt, max_attempts, timestamp, .. } => {
-                                    let max = max_attempts.map(|m| m.to_string()).unwrap_or_else(|| "unlimited".to_string());
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: format!("Restarting ({}/{})", attempt, max),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "warn".to_string(),
-                                    });
-                                }
-                                _ => {}
+                            if let Some(entry) = lifecycle_to_log_entry(&lifecycle_event) {
+                                yield event("log", &LogEntry {
+                                    service: entry.service,
+                                    message: entry.message,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    level: entry.level,
+                                });
                             }
                         }
                         None => break,
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                _ = tokio::time::sleep(config.sse_stream_timeout) => {
                     // Keepalive handled by SSE keep_alive config
                 }
             }
@@ -238,7 +172,7 @@ pub async fn logs_stream(
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
-            .interval(KEEPALIVE_INTERVAL)
+            .interval(keepalive_interval)
             .text("keepalive"),
     )
 }
@@ -247,15 +181,19 @@ pub async fn logs_stream(
 pub async fn all_logs_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let _guard = state.sse_tracker.connect();
-    let shutdown_token = state.shutdown_token.clone();
+    let guard = state.sse_tracker().connect();
+    let shutdown_token = state.shutdown_token().clone();
+    let config = state.config().clone();
+    let keepalive_interval = config.sse_keepalive_interval;
 
     let filter = EventFilter::all();
-    let mut subscriber = state.event_bus.subscribe_filtered(filter.clone());
+    let mut subscriber = state.event_bus().subscribe_filtered(filter);
 
-    let buffered = state.event_bus.replay(&EventFilter::new().with_logs());
+    let buffered = state.event_bus().replay(&EventFilter::new().with_logs());
 
     let stream = async_stream::stream! {
+        let _guard = guard;
+
         yield event(
             "info",
             serde_json::json!({
@@ -266,12 +204,12 @@ pub async fn all_logs_stream(
 
         // Replay buffered log events
         for lifecycle_event in &buffered {
-            if let LifecycleEvent::Log { id, line, timestamp, .. } = lifecycle_event {
+            if let Some(entry) = lifecycle_to_log_entry(lifecycle_event) {
                 yield event("log", &LogEntry {
-                    service: id.to_string(),
-                    message: line.clone(),
-                    timestamp: timestamp.to_rfc3339(),
-                    level: "info".to_string(),
+                    service: entry.service,
+                    message: entry.message,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    level: entry.level,
                 });
             }
         }
@@ -289,71 +227,19 @@ pub async fn all_logs_stream(
                 maybe_event = subscriber.recv() => {
                     match maybe_event {
                         Some(lifecycle_event) => {
-                            match &lifecycle_event {
-                                LifecycleEvent::Log { id, line, timestamp, stream } => {
-                                    let level = match stream {
-                                        dtx_core::resource::LogStreamKind::Stderr => "error",
-                                        _ => "info",
-                                    };
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: line.clone(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: level.to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Starting { id, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: "Service starting".to_string(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Running { id, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: "Service running".to_string(),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Stopped { id, exit_code, timestamp, .. } => {
-                                    let msg = match exit_code {
-                                        Some(code) => format!("Service stopped (exit code: {})", code),
-                                        None => "Service stopped".to_string(),
-                                    };
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: msg,
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "info".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Failed { id, error, timestamp, .. } => {
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: format!("Service failed: {}", error),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "error".to_string(),
-                                    });
-                                }
-                                LifecycleEvent::Restarting { id, attempt, max_attempts, timestamp, .. } => {
-                                    let max = max_attempts.map(|m| m.to_string()).unwrap_or_else(|| "unlimited".to_string());
-                                    yield event("log", &LogEntry {
-                                        service: id.to_string(),
-                                        message: format!("Restarting ({}/{})", attempt, max),
-                                        timestamp: timestamp.to_rfc3339(),
-                                        level: "warn".to_string(),
-                                    });
-                                }
-                                _ => {}
+                            if let Some(entry) = lifecycle_to_log_entry(&lifecycle_event) {
+                                yield event("log", &LogEntry {
+                                    service: entry.service,
+                                    message: entry.message,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    level: entry.level,
+                                });
                             }
                         }
                         None => break,
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                _ = tokio::time::sleep(config.sse_stream_timeout) => {
                     // Keepalive handled by SSE keep_alive config
                 }
             }
@@ -362,20 +248,33 @@ pub async fn all_logs_stream(
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
-            .interval(KEEPALIVE_INTERVAL)
+            .interval(keepalive_interval)
             .text("keepalive"),
     )
+}
+
+/// Stream logs for a specific service with project_id prefix (CLI compatibility).
+/// The project_id is ignored; the service name is extracted from the second path segment.
+pub async fn logs_stream_with_project(
+    state: State<AppState>,
+    Path((_project_id, service)): Path<(String, String)>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    logs_stream(state, Path(service)).await
 }
 
 /// Stream lifecycle events via SSE.
 pub async fn events_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let _guard = state.sse_tracker.connect();
-    let shutdown_token = state.shutdown_token.clone();
-    let mut subscriber = state.event_bus.subscribe();
+    let guard = state.sse_tracker().connect();
+    let shutdown_token = state.shutdown_token().clone();
+    let config = state.config().clone();
+    let keepalive_interval = config.sse_keepalive_interval;
+    let mut subscriber = state.event_bus().subscribe();
 
     let stream = async_stream::stream! {
+        let _guard = guard;
+
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
@@ -396,7 +295,7 @@ pub async fn events_stream(
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                _ = tokio::time::sleep(config.sse_keepalive_interval) => {
                     yield event("keepalive", serde_json::json!({
                         "timestamp": chrono::Utc::now().to_rfc3339()
                     }));
@@ -407,7 +306,7 @@ pub async fn events_stream(
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
-            .interval(KEEPALIVE_INTERVAL)
+            .interval(keepalive_interval)
             .text("keepalive"),
     )
 }

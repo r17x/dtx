@@ -3,12 +3,13 @@
 use askama_axum::Template;
 use axum::extract::{Query, State};
 use dtx_core::model::Service as ModelService;
-use dtx_core::resource::{Resource, ResourceState};
+use dtx_core::resource::ResourceState;
 use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::AppResult;
 use crate::state::AppState;
+use crate::types::PackageAnalysis;
 
 /// Query parameters for index page.
 #[derive(Deserialize, Default)]
@@ -46,40 +47,35 @@ pub async fn index(
     State(state): State<AppState>,
     Query(_query): Query<IndexQuery>,
 ) -> AppResult<IndexTemplate> {
-    let store = state.store.read().await;
+    let services = state.service_ops().list_services().await?;
 
+    let store = state.store().read().await;
     let project_name = store.project_name().to_string();
-    let services = dtx_core::model::services_from_config(store.config());
+    drop(store);
 
     // Get current process statuses from orchestrator if running
     let mut service_statuses: HashMap<String, String> = HashMap::new();
     let mut running_count = 0;
     let mut error_count = 0;
 
-    {
-        let orch_guard = state.orchestrator.read().await;
-        if let Some(ref orchestrator) = *orch_guard {
-            for id in orchestrator.resource_ids() {
-                if let Some(resource) = orchestrator.get_resource(id) {
-                    let proc = resource.read().await;
-                    let state_val = proc.state();
-                    let (status, is_running, is_error) = match state_val {
-                        ResourceState::Pending => ("pending", false, false),
-                        ResourceState::Starting { .. } => ("starting", false, false),
-                        ResourceState::Running { .. } => ("running", true, false),
-                        ResourceState::Stopping { .. } => ("stopping", false, false),
-                        ResourceState::Stopped { .. } => ("stopped", false, false),
-                        ResourceState::Failed { .. } => ("error", false, true),
-                    };
-                    service_statuses.insert(id.to_string(), status.to_string());
+    let statuses = state.orchestrator_handle().status().await.ok().flatten();
+    if let Some(statuses) = statuses {
+        for (id, resource_state) in &statuses {
+            let (status, is_running, is_error) = match resource_state {
+                ResourceState::Pending => ("pending", false, false),
+                ResourceState::Starting { .. } => ("starting", false, false),
+                ResourceState::Running { .. } => ("running", true, false),
+                ResourceState::Stopping { .. } => ("stopping", false, false),
+                ResourceState::Stopped { .. } => ("stopped", false, false),
+                ResourceState::Failed { .. } => ("error", false, true),
+            };
+            service_statuses.insert(id.to_string(), status.to_string());
 
-                    if is_running {
-                        running_count += 1;
-                    }
-                    if is_error {
-                        error_count += 1;
-                    }
-                }
+            if is_running {
+                running_count += 1;
+            }
+            if is_error {
+                error_count += 1;
             }
         }
     }
@@ -119,13 +115,14 @@ pub struct ServicesTemplate {
 
 /// Render the services page.
 pub async fn services_page(State(state): State<AppState>) -> AppResult<ServicesTemplate> {
-    let store = state.store.read().await;
+    let info = state.service_ops().get_project().await?;
+    let services = state.service_ops().list_services().await?;
+
     let project = ProjectInfo {
-        name: store.project_name().to_string(),
-        path: store.project_root().display().to_string(),
-        description: store.project_description().map(|s| s.to_string()),
+        name: info.name.clone(),
+        path: info.path,
+        description: info.description,
     };
-    let services = dtx_core::model::services_from_config(store.config());
 
     Ok(ServicesTemplate {
         title: format!("{} - Services", project.name),
@@ -148,26 +145,13 @@ pub async fn search_page() -> AppResult<SearchTemplate> {
     })
 }
 
-/// Package analysis info for display.
-#[derive(Clone)]
-pub struct PackageAnalysisInfo {
-    pub service_name: String,
-    pub command: String,
-    pub status: String,
-    pub status_class: String,
-    pub package: Option<String>,
-    pub executable: Option<String>,
-    /// Key to use for mapping operations (executable or command).
-    pub mapping_key: String,
-}
-
 /// Mappings page template.
 #[derive(Template)]
 #[template(path = "mappings.html")]
 pub struct MappingsTemplate {
     pub title: String,
     pub project: ProjectInfo,
-    pub packages: Vec<PackageAnalysisInfo>,
+    pub packages: Vec<PackageAnalysis>,
     pub custom_mappings: Vec<(String, String)>,
     pub local_binaries: Vec<String>,
     pub ignored_commands: Vec<String>,
@@ -176,19 +160,23 @@ pub struct MappingsTemplate {
 
 /// Render the package mappings page.
 pub async fn mappings_page(State(state): State<AppState>) -> AppResult<MappingsTemplate> {
-    let store = state.store.read().await;
+    let ops = state.service_ops();
+    let info = ops.get_project().await?;
     let project = ProjectInfo {
-        name: store.project_name().to_string(),
-        path: store.project_root().display().to_string(),
-        description: store.project_description().map(|s| s.to_string()),
+        name: info.name.clone(),
+        path: info.path,
+        description: info.description,
     };
+
+    let store = state.store().read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_root = store.project_root().to_path_buf();
+    drop(store);
 
     // Analyze packages
     let analysis = dtx_core::analyze_service_packages(&services);
 
-    let packages: Vec<PackageAnalysisInfo> = analysis
+    let packages: Vec<PackageAnalysis> = analysis
         .into_iter()
         .map(|a| {
             let (status, status_class, package, executable) = match a.result {
@@ -224,7 +212,7 @@ pub async fn mappings_page(State(state): State<AppState>) -> AppResult<MappingsT
                     .unwrap_or(&a.command)
                     .to_string()
             });
-            PackageAnalysisInfo {
+            PackageAnalysis {
                 service_name: a.service_name,
                 command: a.command,
                 status,

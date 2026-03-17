@@ -1310,6 +1310,7 @@ dependencies = [
  "dtx-core",
  "dtx-process",
  "futures",
+ "indexmap 2.13.0",
  "mime_guess",
  "rust-embed",
  "serde",

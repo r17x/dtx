@@ -1,0 +1,32 @@
+<div id="export-panel" class="dtx-panel">
+  <div class="dtx-panel__header">
+    <h3 class="dtx-panel__title flex items-center gap-2">
+      <span class="text-status-ephemeral">&#x2B06;</span>
+      Export Configuration
+    </h3>
+  </div>
+  <div class="dtx-panel__body">
+    <div class="flex flex-wrap gap-2">
+      <a href="/api/export?format=process-compose"
+         class="dtx-btn dtx-btn--ghost dtx-btn--sm"
+         download="process-compose.yaml">
+        Process Compose
+      </a>
+      <a href="/api/export?format=docker-compose"
+         class="dtx-btn dtx-btn--ghost dtx-btn--sm"
+         download="docker-compose.yaml">
+        Docker Compose
+      </a>
+      <a href="/api/export?format=kubernetes"
+         class="dtx-btn dtx-btn--ghost dtx-btn--sm"
+         download="k8s-manifest.yaml">
+        Kubernetes
+      </a>
+      <a href="/api/export?format=dtx"
+         class="dtx-btn dtx-btn--ghost dtx-btn--sm"
+         download="config.yaml">
+        dtx (native)
+      </a>
+    </div>
+  </div>
+</div>

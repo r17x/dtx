@@ -54,7 +54,21 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/files/:file_type/validate",
             post(handlers::api::validate_file),
-        );
+        )
+        // Health
+        .route("/health", get(handlers::api::get_health))
+        // Export/Import
+        .route("/export", get(handlers::api::export_config))
+        .route("/import", post(handlers::api::import_config))
+        // Dependency graph
+        .route("/graph", get(handlers::api::get_dependency_graph))
+        .route(
+            "/services/:name/deps",
+            put(handlers::api::update_dependencies),
+        )
+        // CLI compatibility routes (project-scoped paths)
+        .route("/projects/:id/stop", post(handlers::api::stop_services))
+        .route("/projects/:id/status", get(handlers::api::get_status));
 
     // HTML routes (full pages)
     let html_routes = Router::new()
@@ -104,14 +118,24 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/mark-ignore/:command",
             post(handlers::htmx::mark_as_ignore),
-        );
+        )
+        // Import/Export/Graph panels
+        .route("/partials/import-form", get(handlers::htmx::import_form))
+        .route("/import", post(handlers::htmx::do_import))
+        .route("/partials/export-panel", get(handlers::htmx::export_panel))
+        .route("/partials/graph", get(handlers::htmx::graph_panel));
 
     // SSE routes (Server-Sent Events)
     let sse_routes = Router::new()
         .route("/status", get(handlers::sse::status_stream))
         .route("/logs/:service", get(handlers::sse::logs_stream))
         .route("/logs", get(handlers::sse::all_logs_stream))
-        .route("/events", get(handlers::sse::events_stream));
+        .route("/events", get(handlers::sse::events_stream))
+        // CLI compatibility route (project-scoped log stream)
+        .route(
+            "/logs/:project_id/:service",
+            get(handlers::sse::logs_stream_with_project),
+        );
 
     // Combine all routes
     Router::new()

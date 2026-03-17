@@ -11,14 +11,16 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
     let store = ConfigStore::discover_and_load()?;
     let project_dir = store.project_root().to_path_buf();
 
-    let state = dtx_web::AppState::new(store);
+    let config = dtx_web::config::WebConfig::from_env();
+    let state = dtx_web::AppState::new(store, config);
 
-    // Clone shutdown token and orchestrator for graceful shutdown
-    let shutdown_token = state.shutdown_token.clone();
-    let orchestrator = state.orchestrator.clone();
+    // Clone shutdown token and orchestrator handle for graceful shutdown
+    let shutdown_token = state.shutdown_token().clone();
+    let orchestrator_handle = state.orchestrator_handle().clone();
 
     // Start Unix socket listener for CLI -> Web event notifications
-    let socket_guard = match dtx_core::events::start_event_listener(state.event_bus.clone()).await {
+    let socket_guard = match dtx_core::events::start_event_listener(state.event_bus().clone()).await
+    {
         Ok(guard) => Some(guard),
         Err(e) => {
             out.warning(&format!("event socket: {}", e));
@@ -29,8 +31,8 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
     // Spawn config reload task: when CLI sends ConfigChanged via socket,
     // reload config.yaml from disk so the web UI reflects the change.
     {
-        let store_for_reload = state.store.clone();
-        let bus = state.event_bus.clone();
+        let store_for_reload = state.store().clone();
+        let bus = state.event_bus().clone();
         let filter = dtx_core::EventFilter::new().without_logs();
         let mut sub = bus.subscribe_filtered(filter);
         tokio::spawn(async move {
@@ -97,19 +99,9 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let stop_future = async {
-            if let Ok(mut orch) =
-                tokio::time::timeout(std::time::Duration::from_secs(2), orchestrator.write()).await
-            {
-                if let Some(ref mut o) = *orch {
-                    let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(3), o.stop_all()).await;
-                }
-                *orch = None;
-            }
-        };
-
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop_future).await;
+        if let Err(e) = orchestrator_handle.shutdown().await {
+            tracing::warn!(error = ?e, "Orchestrator shutdown error");
+        }
 
         stop_step.done("stopped");
     };

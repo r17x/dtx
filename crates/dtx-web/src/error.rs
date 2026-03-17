@@ -1,7 +1,8 @@
 //! Error handling for web server.
 
+use askama_axum::Template;
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -144,6 +145,72 @@ impl AppError {
 /// Result type for web handlers.
 pub type AppResult<T> = Result<T, AppError>;
 
+/// For /api/* handlers — renders as JSON `{"error": "...", "code": N}`.
+pub struct JsonError(pub AppError);
+
+/// For /htmx/* handlers — renders as HTML error toast partial.
+pub struct HtmlError(pub AppError);
+
+/// Result type for API handlers returning JSON errors.
+pub type ApiResult<T> = Result<T, JsonError>;
+
+/// Result type for HTMX handlers returning HTML error toasts.
+pub type HtmxResult<T> = Result<T, HtmlError>;
+
+impl From<AppError> for JsonError {
+    fn from(err: AppError) -> Self {
+        Self(err)
+    }
+}
+
+impl From<AppError> for HtmlError {
+    fn from(err: AppError) -> Self {
+        Self(err)
+    }
+}
+
+impl IntoResponse for JsonError {
+    fn into_response(self) -> Response {
+        let body = Json(ErrorResponse {
+            error: self.0.message,
+            code: self.0.code.as_u16(),
+        });
+        (self.0.code, body).into_response()
+    }
+}
+
+#[derive(Template)]
+#[template(path = "partials/error_toast.html")]
+struct ErrorToastTemplate<'a> {
+    message: &'a str,
+}
+
+impl IntoResponse for HtmlError {
+    fn into_response(self) -> Response {
+        let status = self.0.code;
+        let template = ErrorToastTemplate {
+            message: &self.0.message,
+        };
+        let body = template.render().unwrap_or_else(|_| self.0.message.clone());
+        (
+            status,
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("text/html")),
+                (
+                    HeaderName::from_static("hx-retarget"),
+                    HeaderValue::from_static("body"),
+                ),
+                (
+                    HeaderName::from_static("hx-reswap"),
+                    HeaderValue::from_static("beforeend"),
+                ),
+            ],
+            body,
+        )
+            .into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +227,41 @@ mod tests {
         let err = AppError::bad_request("Invalid input");
         assert_eq!(err.code, StatusCode::BAD_REQUEST);
         assert_eq!(err.message, "Invalid input");
+    }
+
+    #[test]
+    fn test_json_error_from_app_error() {
+        let app_err = AppError::not_found("missing");
+        let json_err = JsonError::from(app_err);
+        assert_eq!(json_err.0.code, StatusCode::NOT_FOUND);
+        assert_eq!(json_err.0.message, "missing");
+    }
+
+    #[test]
+    fn test_html_error_from_app_error() {
+        let app_err = AppError::bad_request("bad input");
+        let html_err = HtmlError::from(app_err);
+        assert_eq!(html_err.0.code, StatusCode::BAD_REQUEST);
+        assert_eq!(html_err.0.message, "bad input");
+    }
+
+    #[test]
+    fn test_json_error_response_is_json() {
+        let err = JsonError(AppError::not_found("gone"));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let content_type = response.headers().get(header::CONTENT_TYPE).unwrap();
+        assert!(content_type.to_str().unwrap().contains("application/json"));
+    }
+
+    #[test]
+    fn test_html_error_response_has_htmx_headers() {
+        let err = HtmlError(AppError::internal("oops"));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers().get("hx-retarget").unwrap(), "body");
+        assert_eq!(response.headers().get("hx-reswap").unwrap(), "beforeend");
+        let content_type = response.headers().get(header::CONTENT_TYPE).unwrap();
+        assert!(content_type.to_str().unwrap().contains("text/html"));
     }
 }
