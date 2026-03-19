@@ -30,7 +30,7 @@ jobs:
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@v12
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: r17
           skipPush: true
@@ -85,7 +85,7 @@ jobs:
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
         if: runner.os == 'Linux'
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: r17
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
@@ -110,7 +110,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: r17
           skipPush: true
@@ -131,7 +131,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: r17
           skipPush: true
