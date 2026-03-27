@@ -54,7 +54,11 @@ pub use events::{
     start_event_listener, DependencyCondition as LifecycleDependencyCondition, EventFilter,
     LifecycleEvent, PortGuard, ResourceEventBus, ResourceEventSubscriber, SocketGuard,
 };
-pub use graph::{CycleError, DependencyGraph, GraphNode, GraphValidator};
+pub use graph::{
+    CycleError, DependencyGraph, DomainStatus, EdgeConfidence, EdgeKind, FileSource, GraphEdge,
+    GraphNode, GraphSources, GraphStats, GraphValidator, GraphView, ImpactEntry, ImpactSet,
+    MemorySource, NodeDomain, NodeMetadata, SymbolSource,
+};
 pub use nix::{
     analyze_service_packages, ast::FlakeAst, dev_env_cache, extract_executable, find_flake_path,
     get_services_needing_attention, infer_package, infer_package_detailed,
