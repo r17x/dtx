@@ -13,7 +13,7 @@ fn setup_test_state_with_dir(temp_dir: &std::path::Path) -> AppState {
     .unwrap();
 
     let store = dtx_core::store::ConfigStore::load(dtx_dir.join("config.yaml")).unwrap();
-    AppState::new(store)
+    AppState::new(store, dtx_web::config::WebConfig::default())
 }
 
 #[tokio::test]
@@ -55,7 +55,7 @@ resources:
     .unwrap();
 
     let store = dtx_core::store::ConfigStore::load(dtx_dir.join("config.yaml")).unwrap();
-    let state = AppState::new(store);
+    let state = AppState::new(store, dtx_web::config::WebConfig::default());
     let app = create_router(state);
     let client = axum_test::TestServer::new(app).unwrap();
 
@@ -121,7 +121,7 @@ resources:
     .unwrap();
 
     let store = dtx_core::store::ConfigStore::load(dtx_dir.join("config.yaml")).unwrap();
-    let state = AppState::new(store);
+    let state = AppState::new(store, dtx_web::config::WebConfig::default());
     let app = create_router(state);
     let client = axum_test::TestServer::new(app).unwrap();
 

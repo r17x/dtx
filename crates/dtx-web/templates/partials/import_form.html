@@ -1,0 +1,32 @@
+<div id="import-form" class="dtx-panel">
+  <div class="dtx-panel__header">
+    <h3 class="dtx-panel__title flex items-center gap-2">
+      <span class="text-status-ephemeral">&#x2B07;</span>
+      Import Configuration
+    </h3>
+  </div>
+  <div class="dtx-panel__body">
+    <form hx-post="/htmx/import" hx-target="#import-result" hx-swap="innerHTML">
+      <div class="mb-4">
+        <label class="block text-sm text-gray-400 mb-1">Format</label>
+        <select name="format" class="bg-gray-700 text-white rounded px-3 py-2 w-full border border-gray-600 focus:border-status-active focus:outline-none">
+          <option value="auto">Auto-detect</option>
+          <option value="docker-compose">Docker Compose</option>
+          <option value="process-compose">Process Compose</option>
+          <option value="procfile">Procfile</option>
+        </select>
+      </div>
+      <div class="mb-4">
+        <label class="block text-sm text-gray-400 mb-1">Configuration</label>
+        <textarea name="content" rows="10"
+                  class="bg-gray-700 text-white rounded px-3 py-2 w-full font-mono text-sm border border-gray-600 focus:border-status-active focus:outline-none"
+                  placeholder="Paste your configuration here..."></textarea>
+      </div>
+      <button type="submit"
+              class="dtx-btn dtx-btn--primary">
+        Import
+      </button>
+    </form>
+    <div id="import-result" class="mt-4"></div>
+  </div>
+</div>

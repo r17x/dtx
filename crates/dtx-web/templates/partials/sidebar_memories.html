@@ -1,0 +1,15 @@
+{% if memories.is_empty() %}
+<div class="px-4 py-8 text-center dtx-text-muted">
+    <p>No memories stored</p>
+</div>
+{% else %}
+    {% for mem in memories %}
+    <button class="dtx-activity-item" onclick="selectGraphNode('memory:{{ mem.name }}')">
+        <div class="dtx-activity-item__service">
+            <span class="dtx-activity-item__kind-badge">{{ mem.kind }}</span>
+            <span>{{ mem.name }}</span>
+        </div>
+        <div class="dtx-activity-item__message">{{ mem.preview }}</div>
+    </button>
+    {% endfor %}
+{% endif %}

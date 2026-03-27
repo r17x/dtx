@@ -2,12 +2,12 @@
 //!
 //! Handles MCP-specific requests like initialize, list resources, and call tools.
 
-#[cfg(any(feature = "code", feature = "memory"))]
+#[cfg(any(feature = "code", feature = "memory", feature = "graph"))]
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-#[cfg(any(feature = "code", feature = "memory"))]
+#[cfg(any(feature = "code", feature = "memory", feature = "graph"))]
 mod args {
     use crate::jsonrpc::ErrorObject;
 
@@ -106,6 +106,8 @@ pub struct DefaultMcpHandler<H> {
     code: Option<Arc<dtx_code::WorkspaceIndex>>,
     #[cfg(feature = "memory")]
     memory: Option<Arc<dtx_memory::MemoryStore>>,
+    #[cfg(feature = "graph")]
+    graph_builder: Option<Arc<dyn Fn() -> dtx_core::DependencyGraph + Send + Sync>>,
 }
 
 impl<H> DefaultMcpHandler<H> {
@@ -120,6 +122,8 @@ impl<H> DefaultMcpHandler<H> {
             code: None,
             #[cfg(feature = "memory")]
             memory: None,
+            #[cfg(feature = "graph")]
+            graph_builder: None,
         }
     }
 
@@ -161,6 +165,24 @@ impl<H> DefaultMcpHandler<H> {
         self.memory
             .as_ref()
             .ok_or_else(|| ErrorObject::internal_error("Memory store not configured"))
+    }
+
+    /// Set graph builder callback.
+    #[cfg(feature = "graph")]
+    pub fn with_graph_builder(
+        mut self,
+        builder: Arc<dyn Fn() -> dtx_core::DependencyGraph + Send + Sync>,
+    ) -> Self {
+        self.graph_builder = Some(builder);
+        self
+    }
+
+    #[cfg(feature = "graph")]
+    fn require_graph(&self) -> Result<dtx_core::DependencyGraph, ErrorObject> {
+        self.graph_builder
+            .as_ref()
+            .map(|f| f())
+            .ok_or_else(|| ErrorObject::internal_error("Graph not configured"))
     }
 
     fn require_initialized(&self) -> Result<(), ErrorObject> {
@@ -489,12 +511,23 @@ impl<H: ProtocolHandler> McpHandler for DefaultMcpHandler<H> {
                 .map_err(|e| ErrorObject::internal_error(format!("Task join error: {e}")))?
             }
 
+            // Graph query tools
+            #[cfg(feature = "graph")]
+            "query_graph" | "get_impact" | "graph_status" => {
+                let graph = self.require_graph()?;
+                let name = params.name.clone();
+                let arguments = params.arguments.clone();
+                tokio::task::spawn_blocking(move || handle_graph_tool(&graph, &name, &arguments))
+                    .await
+                    .map_err(|e| ErrorObject::internal_error(format!("Task join error: {e}")))?
+            }
+
             _ => Err(ErrorObject::method_not_found(&params.name)),
         }
     }
 }
 
-#[cfg(any(feature = "code", feature = "memory"))]
+#[cfg(any(feature = "code", feature = "memory", feature = "graph"))]
 fn append_note(result: &mut CallToolResult, note: &str) {
     if let Some(super::tools::ToolContent::Text { ref mut text }) = result.content.first_mut() {
         text.push_str("\n\n");
@@ -1355,6 +1388,158 @@ fn handle_onboarding_tool(
             Ok(CallToolResult::text(instructions))
         }
         _ => Err(ErrorObject::method_not_found(name)),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn handle_graph_tool(
+    graph: &dtx_core::DependencyGraph,
+    name: &str,
+    raw_args: &Option<serde_json::Value>,
+) -> Result<CallToolResult, ErrorObject> {
+    match name {
+        "query_graph" => {
+            let mut g = if let Some(a) = raw_args.as_ref() {
+                if let Some(view_str) = args::optional_str(a, "view") {
+                    let view = parse_graph_view(view_str)?;
+                    graph.filter_by_view(view)
+                } else {
+                    graph.clone()
+                }
+            } else {
+                graph.clone()
+            };
+
+            if let Some(a) = raw_args.as_ref() {
+                // Filter edges by kind
+                let edge_kind = args::optional_str(a, "edge_kind")
+                    .map(parse_edge_kind)
+                    .transpose()?;
+
+                // Filter edges by min confidence
+                let min_confidence = args::optional_str(a, "min_confidence")
+                    .map(parse_edge_confidence)
+                    .transpose()?;
+
+                if edge_kind.is_some() || min_confidence.is_some() {
+                    let filtered: Vec<dtx_core::GraphEdge> = g
+                        .edges_filtered(edge_kind, min_confidence)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    g.edges = filtered;
+                }
+
+                // Filter nodes by domain
+                if let Some(domain_str) = args::optional_str(a, "domain") {
+                    let domain = parse_node_domain(domain_str)?;
+                    g.nodes.retain(|_, n| n.domain == domain);
+                }
+
+                // Filter nodes by label pattern
+                if let Some(pattern) = args::optional_str(a, "pattern") {
+                    let lower = pattern.to_lowercase();
+                    g.nodes
+                        .retain(|_, n| n.label.to_lowercase().contains(&lower));
+                }
+
+                // Apply limit
+                if let Some(limit) = args::optional_usize(a, "limit") {
+                    if g.nodes.len() > limit {
+                        let keys: Vec<String> = g.nodes.keys().skip(limit).cloned().collect();
+                        for key in keys {
+                            g.nodes.remove(&key);
+                        }
+                    }
+                }
+
+                // Remove edges referencing removed nodes
+                let node_ids: std::collections::HashSet<&String> = g.nodes.keys().collect();
+                g.edges
+                    .retain(|e| node_ids.contains(&e.source) && node_ids.contains(&e.target));
+            }
+
+            let total_nodes = g.nodes.len();
+            let total_edges = g.edges.len();
+            let mut result = CallToolResult::json(&g);
+            append_note(
+                &mut result,
+                &format!("{total_nodes} nodes, {total_edges} edges"),
+            );
+            Ok(result)
+        }
+        "get_impact" => {
+            let a = args::require(raw_args)?;
+            let node_id = args::require_str(a, "node_id")?;
+            let min_confidence = args::optional_str(a, "min_confidence")
+                .map(parse_edge_confidence)
+                .transpose()?
+                .unwrap_or(dtx_core::EdgeConfidence::Speculative);
+
+            let impact = graph.impact(node_id, min_confidence);
+            Ok(CallToolResult::json(&impact))
+        }
+        "graph_status" => {
+            let stats = graph.stats();
+            Ok(CallToolResult::json(&stats))
+        }
+        _ => Err(ErrorObject::method_not_found(name)),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn parse_graph_view(s: &str) -> Result<dtx_core::GraphView, ErrorObject> {
+    match s {
+        "processes" => Ok(dtx_core::GraphView::Processes),
+        "code" => Ok(dtx_core::GraphView::Code),
+        "memories" => Ok(dtx_core::GraphView::Memories),
+        "files" => Ok(dtx_core::GraphView::Files),
+        "knowledge" => Ok(dtx_core::GraphView::Knowledge),
+        _ => Err(ErrorObject::invalid_params(format!(
+            "Invalid view: {s}. Expected: processes, code, memories, files, knowledge"
+        ))),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn parse_edge_kind(s: &str) -> Result<dtx_core::EdgeKind, ErrorObject> {
+    match s {
+        "depends_on" => Ok(dtx_core::EdgeKind::DependsOn),
+        "provides" => Ok(dtx_core::EdgeKind::Provides),
+        "implements" => Ok(dtx_core::EdgeKind::Implements),
+        "configures" => Ok(dtx_core::EdgeKind::Configures),
+        "references" => Ok(dtx_core::EdgeKind::References),
+        "documents" => Ok(dtx_core::EdgeKind::Documents),
+        "calls" => Ok(dtx_core::EdgeKind::Calls),
+        "contains" => Ok(dtx_core::EdgeKind::Contains),
+        _ => Err(ErrorObject::invalid_params(format!(
+            "Invalid edge kind: {s}. Expected: depends_on, provides, implements, configures, references, documents, calls, contains"
+        ))),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn parse_edge_confidence(s: &str) -> Result<dtx_core::EdgeConfidence, ErrorObject> {
+    match s {
+        "speculative" => Ok(dtx_core::EdgeConfidence::Speculative),
+        "probable" => Ok(dtx_core::EdgeConfidence::Probable),
+        "definite" => Ok(dtx_core::EdgeConfidence::Definite),
+        _ => Err(ErrorObject::invalid_params(format!(
+            "Invalid confidence: {s}. Expected: speculative, probable, definite"
+        ))),
+    }
+}
+
+#[cfg(feature = "graph")]
+fn parse_node_domain(s: &str) -> Result<dtx_core::NodeDomain, ErrorObject> {
+    match s {
+        "resource" => Ok(dtx_core::NodeDomain::Resource),
+        "symbol" => Ok(dtx_core::NodeDomain::Symbol),
+        "memory" => Ok(dtx_core::NodeDomain::Memory),
+        "file" => Ok(dtx_core::NodeDomain::File),
+        _ => Err(ErrorObject::invalid_params(format!(
+            "Invalid domain: {s}. Expected: resource, symbol, memory, file"
+        ))),
     }
 }
 

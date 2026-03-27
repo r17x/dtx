@@ -1,0 +1,50 @@
+{% if services.is_empty() %}
+<div class="px-4 py-8 text-center dtx-text-muted">
+    <p>No services configured</p>
+    <p class="text-xs mt-2">Run <code>dtx add &lt;service&gt;</code> to add one</p>
+</div>
+{% else %}
+    {% for service in services %}
+    <div class="group relative">
+    <button class="dtx-activity-item"
+            hx-get="/htmx/services/{{ service.name }}"
+            hx-target="#detail-panel"
+            hx-swap="innerHTML"
+            hx-indicator=".dtx-activity-item__loading"
+            onclick="openDetailPanel()"
+            data-service-name="{{ service.name }}">
+
+        <div class="dtx-activity-item__header">
+            <div class="dtx-activity-item__service">
+                <span>{{ service.name }}</span>
+                <span class="dtx-activity-item__status-dot dtx-activity-item__status-dot--stopped"
+                      id="status-dot-{{ service.name }}"
+                      data-service-name="{{ service.name }}"></span>
+            </div>
+            <span class="dtx-activity-item__port">
+                {% match service.port %}{% when Some with (port) %}:{{ port }}{% when None %}{% endmatch %}
+            </span>
+        </div>
+
+        <p class="dtx-activity-item__message">
+            {% match service.package %}
+            {% when Some with (pkg) %}
+            <span class="text-status-ephemeral">{{ pkg }}</span>
+            {% when None %}
+            <span class="text-gray-500">{{ service.command }}</span>
+            {% endmatch %}
+        </p>
+        <span class="dtx-activity-item__loading htmx-indicator">Loading...</span>
+    </button>
+    <button class="absolute top-2 right-2 text-gray-600 hover:text-status-error text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+            hx-delete="/htmx/services/{{ service.name }}"
+            hx-confirm="Delete service {{ service.name }}?"
+            hx-swap="none"
+            hx-on::after-request="if(event.detail.successful) window.location.reload()"
+            onclick="event.stopPropagation()"
+            title="Delete {{ service.name }}">
+        &#x2715;
+    </button>
+    </div>
+    {% endfor %}
+{% endif %}

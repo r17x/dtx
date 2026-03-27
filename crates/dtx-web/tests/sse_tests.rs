@@ -19,7 +19,7 @@ fn setup_test_state() -> AppState {
     let store = dtx_core::store::ConfigStore::load(dtx_dir.join("config.yaml")).unwrap();
     // Leak tempdir so it persists for the test duration
     std::mem::forget(temp_dir);
-    AppState::new(store)
+    AppState::new(store, dtx_web::config::WebConfig::default())
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn test_htmx_live_logs_panel() {
 async fn test_connection_tracker() {
     use dtx_web::sse::ConnectionTracker;
 
-    let tracker = ConnectionTracker::new();
+    let tracker = ConnectionTracker::new(); // Returns Arc<ConnectionTracker>
     assert_eq!(tracker.connection_count(), 0);
 
     let _guard1 = tracker.connect();

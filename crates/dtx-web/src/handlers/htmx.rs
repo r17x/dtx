@@ -1,15 +1,19 @@
 //! HTMX partial handlers.
 
+use askama::Template as AskamaRender;
 use askama_axum::Template;
 use axum::extract::{Path, Query, State};
 use axum::Form;
-use dtx_core::config::schema::ResourceConfig;
+use dtx_core::graph::SymbolSource;
 use dtx_core::model::Service as ModelService;
 use serde::{Deserialize, Deserializer};
-use std::collections::HashSet;
 
 use crate::error::{AppError, AppResult};
+use crate::service::ops::CreateServiceParams;
 use crate::state::AppState;
+use crate::types::PackageAnalysis;
+
+use super::api;
 
 /// Deserialize an empty form field as `None` instead of failing.
 fn empty_string_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -34,8 +38,7 @@ pub struct ServicesListTemplate {
 
 /// Render the services list partial.
 pub async fn services_list(State(state): State<AppState>) -> AppResult<ServicesListTemplate> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
+    let services = state.service_ops().list_services().await?;
     Ok(ServicesListTemplate { services })
 }
 
@@ -52,11 +55,7 @@ pub async fn service_detail(
     State(state): State<AppState>,
     Path(service_name): Path<String>,
 ) -> AppResult<ServiceDetailTemplate> {
-    let store = state.store.read().await;
-    let rc = store
-        .get_resource(&service_name)
-        .ok_or_else(|| AppError::not_found(format!("Service '{}' not found", service_name)))?;
-    let service = ModelService::from_resource_config(&service_name, rc);
+    let service = state.service_ops().get_service(&service_name).await?;
     let status = "stopped".to_string();
     Ok(ServiceDetailTemplate { service, status })
 }
@@ -71,8 +70,7 @@ pub struct StatusPanelTemplate {
 
 /// Render the status panel partial.
 pub async fn status_panel(State(state): State<AppState>) -> AppResult<StatusPanelTemplate> {
-    let orch = state.orchestrator.read().await;
-    let running = orch.as_ref().map(|o| o.is_running()).unwrap_or(false);
+    let running = state.orchestrator_handle().is_running();
     let status = if running {
         "Running".to_string()
     } else {
@@ -94,12 +92,8 @@ pub struct SearchResultsTemplate {
 #[derive(Deserialize)]
 pub struct SearchParams {
     pub q: String,
-    #[serde(default = "default_limit")]
+    #[serde(default = "crate::config::WebConfig::default_search_limit")]
     pub limit: usize,
-}
-
-fn default_limit() -> usize {
-    20
 }
 
 /// Render the search results partial.
@@ -107,13 +101,10 @@ pub async fn search_results(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
 ) -> AppResult<SearchResultsTemplate> {
-    let mut packages = state
-        .nix_client
-        .search(&params.q)
-        .await
-        .map_err(crate::error::AppError::from)?;
-
-    packages.truncate(params.limit);
+    let packages = state
+        .service_ops()
+        .nix_search(&params.q, Some(params.limit))
+        .await?;
 
     Ok(SearchResultsTemplate {
         packages,
@@ -196,48 +187,14 @@ pub async fn create_service(
     State(state): State<AppState>,
     Form(form): Form<CreateServiceForm>,
 ) -> AppResult<ServicesListTemplate> {
-    // Validate package if provided
-    if let Some(ref pkg) = form.package {
-        if !pkg.is_empty()
-            && !state
-                .nix_client
-                .validate(pkg)
-                .await
-                .map_err(AppError::from)?
-        {
-            return Err(AppError::bad_request(format!(
-                "Package '{}' not found",
-                pkg
-            )));
-        }
-    }
-
-    let pkg = form.package.filter(|s| !s.is_empty());
-    let rc = ResourceConfig {
-        command: Some(form.command),
+    let params = CreateServiceParams {
+        name: form.name,
+        command: form.command,
+        package: form.package,
         port: form.port,
-        nix: pkg.as_ref().map(|p| dtx_core::config::schema::NixConfig {
-            packages: vec![p.clone()],
-            ..Default::default()
-        }),
-        ..Default::default()
+        working_dir: None,
     };
-
-    let mut store = state.store.write().await;
-    store.add_resource(&form.name, rc).map_err(AppError::from)?;
-
-    // Sync flake.nix if service has a package
-    if let Some(ref p) = pkg {
-        let project_root = store.project_root().to_path_buf();
-        let project_name = store.project_name().to_string();
-        if let Err(e) = dtx_core::sync_add_package(&project_root, &project_name, p) {
-            tracing::warn!("Failed to sync flake.nix: {}", e);
-        }
-    }
-
-    store.save().map_err(AppError::from)?;
-
-    let services = dtx_core::model::services_from_config(store.config());
+    let (_, services) = state.service_ops().create_service(params).await?;
     Ok(ServicesListTemplate { services })
 }
 
@@ -246,31 +203,7 @@ pub async fn delete_service(
     State(state): State<AppState>,
     Path(service_name): Path<String>,
 ) -> AppResult<ServicesListTemplate> {
-    let mut store = state.store.write().await;
-
-    let removed_rc = store
-        .remove_resource(&service_name)
-        .map_err(AppError::from)?;
-
-    // Sync flake.nix if the removed service had a package
-    let removed_package = removed_rc
-        .nix
-        .as_ref()
-        .and_then(|n| n.packages.first().cloned());
-    if let Some(ref pkg) = removed_package {
-        let project_root = store.project_root().to_path_buf();
-        let remaining_packages: HashSet<String> = store
-            .list_resources()
-            .filter_map(|(_, rc)| rc.nix.as_ref().and_then(|n| n.packages.first().cloned()))
-            .collect();
-        if let Err(e) = dtx_core::sync_remove_package(&project_root, pkg, &remaining_packages) {
-            tracing::warn!("Failed to sync flake.nix: {}", e);
-        }
-    }
-
-    store.save().map_err(AppError::from)?;
-
-    let services = dtx_core::model::services_from_config(store.config());
+    let services = state.service_ops().delete_service(&service_name).await?;
     Ok(ServicesListTemplate { services })
 }
 
@@ -295,46 +228,32 @@ pub async fn add_package(
     State(state): State<AppState>,
     Form(form): Form<AddPackageForm>,
 ) -> AppResult<AddPackageResultTemplate> {
+    let ops = state.service_ops();
+
     // Validate package exists
-    if !state
-        .nix_client
-        .validate(&form.package)
-        .await
-        .map_err(AppError::from)?
-    {
-        let store = state.store.read().await;
-        let project_name = store.project_name().to_string();
+    let valid = ops.nix_validate(&form.package).await?;
+
+    if !valid {
+        let info = ops.get_project().await?;
         return Ok(AddPackageResultTemplate {
             success: false,
             message: format!("Package '{}' not found", form.package),
             package: form.package,
-            project_name: Some(project_name),
+            project_name: Some(info.name),
         });
     }
 
-    let mut store = state.store.write().await;
-    let project_name = store.project_name().to_string();
-
-    let rc = ResourceConfig {
-        command: Some(form.package.clone()),
-        nix: Some(dtx_core::config::schema::NixConfig {
-            packages: vec![form.package.clone()],
-            ..Default::default()
-        }),
-        ..Default::default()
+    let params = CreateServiceParams {
+        name: form.package.clone(),
+        command: form.package.clone(),
+        package: Some(form.package.clone()),
+        port: None,
+        working_dir: None,
     };
+    let info = ops.get_project().await?;
+    let project_name = info.name;
 
-    store
-        .add_resource(&form.package, rc)
-        .map_err(AppError::from)?;
-
-    // Sync flake.nix
-    let project_root = store.project_root().to_path_buf();
-    if let Err(e) = dtx_core::sync_add_package(&project_root, &project_name, &form.package) {
-        tracing::warn!("Failed to sync flake.nix: {}", e);
-    }
-
-    store.save().map_err(AppError::from)?;
+    ops.create_service(params).await?;
 
     Ok(AddPackageResultTemplate {
         success: true,
@@ -346,81 +265,17 @@ pub async fn add_package(
 
 // === Package Mappings Handlers ===
 
-/// Package analysis info for HTMX responses.
-#[derive(Clone)]
-pub struct PackageAnalysisInfo {
-    pub service_name: String,
-    pub command: String,
-    pub status: String,
-    pub status_class: String,
-    pub package: Option<String>,
-    pub executable: Option<String>,
-    /// Key to use for mapping operations (executable or command).
-    pub mapping_key: String,
-}
-
 /// Mappings panel partial template.
 #[derive(Template)]
 #[template(path = "partials/mappings_table.html")]
 pub struct MappingsPanelTemplate {
-    pub packages: Vec<PackageAnalysisInfo>,
+    pub packages: Vec<PackageAnalysis>,
 }
 
 /// Render the mappings panel partial.
 pub async fn mappings_panel(State(state): State<AppState>) -> AppResult<MappingsPanelTemplate> {
-    let store = state.store.read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-
-    let analysis = dtx_core::analyze_service_packages(&services);
-
-    let packages: Vec<PackageAnalysisInfo> = analysis
-        .into_iter()
-        .map(|a| {
-            let (status, status_class, package, executable) = match a.result {
-                dtx_core::PackageAnalysisResult::Explicit(p) => (
-                    "Explicit".to_string(),
-                    "status--explicit".to_string(),
-                    Some(p),
-                    None,
-                ),
-                dtx_core::PackageAnalysisResult::AutoDetected(p) => (
-                    "Auto-detected".to_string(),
-                    "status--auto".to_string(),
-                    Some(p),
-                    None,
-                ),
-                dtx_core::PackageAnalysisResult::LocalBinary => (
-                    "Local Binary".to_string(),
-                    "status--local".to_string(),
-                    None,
-                    None,
-                ),
-                dtx_core::PackageAnalysisResult::NeedsAttention(e) => (
-                    "Needs Attention".to_string(),
-                    "status--warning".to_string(),
-                    None,
-                    Some(e),
-                ),
-            };
-            let mapping_key = executable.clone().unwrap_or_else(|| {
-                a.command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(&a.command)
-                    .to_string()
-            });
-            PackageAnalysisInfo {
-                service_name: a.service_name,
-                command: a.command,
-                status,
-                status_class,
-                package,
-                executable,
-                mapping_key,
-            }
-        })
-        .collect();
-
+    let analysis = state.service_ops().analyze_packages().await?;
+    let packages = to_package_analysis_display(analysis);
     Ok(MappingsPanelTemplate { packages })
 }
 
@@ -443,15 +298,15 @@ pub async fn add_mapping(
     State(state): State<AppState>,
     Form(form): Form<AddMappingForm>,
 ) -> AppResult<MappingsListTemplate> {
-    let store = state.store.read().await;
+    let ops = state.service_ops();
+    ops.add_mapping(&form.command, &form.package).await?;
+
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
+    drop(store);
 
-    let mut config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
-    config.add_mapping(&form.command, &form.package);
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
+    let config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
     let custom_mappings: Vec<(String, String)> = config.mappings.packages.into_iter().collect();
 
     Ok(MappingsListTemplate { custom_mappings })
@@ -462,15 +317,15 @@ pub async fn remove_mapping(
     State(state): State<AppState>,
     Path(command): Path<String>,
 ) -> AppResult<MappingsListTemplate> {
-    let store = state.store.read().await;
+    let ops = state.service_ops();
+    ops.remove_mapping(&command).await?;
+
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
+    drop(store);
 
-    let mut config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
-    config.remove_mapping(&command);
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
+    let config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
     let custom_mappings: Vec<(String, String)> = config.mappings.packages.into_iter().collect();
 
     Ok(MappingsListTemplate { custom_mappings })
@@ -481,19 +336,9 @@ pub async fn mark_as_local(
     State(state): State<AppState>,
     Path(command): Path<String>,
 ) -> AppResult<MappingsPanelTemplate> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
-
-    let mut config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
-    config.add_local(&command);
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::internal(e.to_string()))?;
-
-    // Drop store read lock before re-calling
-    drop(store);
-
-    mappings_panel(State(state)).await
+    let analysis = state.service_ops().mark_local(&command).await?;
+    let packages = to_package_analysis_display(analysis);
+    Ok(MappingsPanelTemplate { packages })
 }
 
 /// Mark a command as ignored via HTMX.
@@ -501,17 +346,307 @@ pub async fn mark_as_ignore(
     State(state): State<AppState>,
     Path(command): Path<String>,
 ) -> AppResult<MappingsPanelTemplate> {
-    let store = state.store.read().await;
-    let project_root = store.project_root().to_path_buf();
+    let analysis = state.service_ops().mark_ignore(&command).await?;
+    let packages = to_package_analysis_display(analysis);
+    Ok(MappingsPanelTemplate { packages })
+}
 
-    let mut config = dtx_core::ProjectConfig::load(&project_root).unwrap_or_default();
-    config.add_ignore(&command);
-    config
-        .save(&project_root)
-        .map_err(|e| AppError::internal(e.to_string()))?;
+/// Convert service-layer PackageAnalysis to display-ready PackageAnalysis with status_class and mapping_key.
+fn to_package_analysis_display(
+    analyses: Vec<crate::service::ops::PackageAnalysis>,
+) -> Vec<PackageAnalysis> {
+    analyses
+        .into_iter()
+        .map(|a| {
+            let status_class = match a.status.as_str() {
+                "explicit" => "status--explicit".to_string(),
+                "auto" => "status--auto".to_string(),
+                "local" => "status--local".to_string(),
+                "needs_attention" => "status--warning".to_string(),
+                _ => String::new(),
+            };
+            let display_status = match a.status.as_str() {
+                "explicit" => "Explicit".to_string(),
+                "auto" => "Auto-detected".to_string(),
+                "local" => "Local Binary".to_string(),
+                "needs_attention" => "Needs Attention".to_string(),
+                _ => a.status.clone(),
+            };
+            let mapping_key = a.executable.clone().unwrap_or_else(|| {
+                a.command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&a.command)
+                    .to_string()
+            });
+            PackageAnalysis {
+                service_name: a.service_name,
+                command: a.command,
+                status: display_status,
+                status_class,
+                package: a.package,
+                executable: a.executable,
+                mapping_key,
+            }
+        })
+        .collect()
+}
 
-    // Drop store read lock before re-calling
-    drop(store);
+// === Import/Export/Graph Panel Handlers ===
 
-    mappings_panel(State(state)).await
+#[derive(Template)]
+#[template(path = "partials/import_form.html")]
+pub struct ImportFormTemplate {}
+
+pub async fn import_form() -> AppResult<ImportFormTemplate> {
+    Ok(ImportFormTemplate {})
+}
+
+#[derive(Deserialize)]
+pub struct ImportForm {
+    pub content: String,
+    #[serde(default = "crate::config::WebConfig::default_import_format")]
+    pub format: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/import_result.html")]
+pub struct ImportResultTemplate {
+    pub success: bool,
+    pub imported: usize,
+    pub warnings: Vec<String>,
+    pub services: Vec<ModelService>,
+}
+
+pub async fn do_import(
+    State(state): State<AppState>,
+    Form(form): Form<ImportForm>,
+) -> AppResult<ImportResultTemplate> {
+    match state
+        .service_ops()
+        .import_config(&form.content, &form.format)
+        .await
+    {
+        Ok(result) => Ok(ImportResultTemplate {
+            success: true,
+            imported: result.imported,
+            warnings: result.warnings,
+            services: result.services,
+        }),
+        Err(e) => Ok(ImportResultTemplate {
+            success: false,
+            imported: 0,
+            warnings: vec![e.message],
+            services: Vec::new(),
+        }),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "partials/export_panel.html")]
+pub struct ExportPanelTemplate {}
+
+pub async fn export_panel() -> AppResult<ExportPanelTemplate> {
+    Ok(ExportPanelTemplate {})
+}
+
+#[derive(Template)]
+#[template(path = "partials/graph_panel.html")]
+pub struct GraphPanelTemplate {}
+
+pub async fn graph_panel(State(_state): State<AppState>) -> AppResult<GraphPanelTemplate> {
+    Ok(GraphPanelTemplate {})
+}
+
+// === Sidebar Contextual Lists ===
+
+/// Render an Askama template into an `Html` response.
+fn render_partial(tmpl: &impl AskamaRender) -> AppResult<axum::response::Html<String>> {
+    Ok(axum::response::Html(
+        tmpl.render()
+            .map_err(|e| AppError::internal(format!("Template error: {e}")))?,
+    ))
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_symbols.html")]
+pub struct SidebarSymbolsTemplate {
+    pub symbols: Vec<SymbolSource>,
+}
+
+/// A memory entry for sidebar display.
+pub struct SidebarMemory {
+    pub name: String,
+    pub kind: String,
+    pub preview: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_memories.html")]
+pub struct SidebarMemoriesTemplate {
+    pub memories: Vec<SidebarMemory>,
+}
+
+/// A file entry for sidebar display.
+pub struct SidebarFile {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_files.html")]
+pub struct SidebarFilesTemplate {
+    pub files: Vec<SidebarFile>,
+}
+
+/// An entity entry for sidebar display (knowledge view — top connected nodes).
+pub struct SidebarEntity {
+    pub id: String,
+    pub domain: String,
+    pub label: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_entities.html")]
+pub struct SidebarEntitiesTemplate {
+    pub entities: Vec<SidebarEntity>,
+}
+
+/// Sidebar services list (reuses existing template).
+#[derive(Template)]
+#[template(path = "partials/sidebar_services.html")]
+pub struct SidebarServicesTemplate {
+    pub services: Vec<ModelService>,
+}
+
+/// Render sidebar list content based on the current view.
+pub async fn sidebar_list(
+    State(state): State<AppState>,
+    Path(view): Path<String>,
+) -> AppResult<axum::response::Html<String>> {
+    match view.as_str() {
+        "processes" => {
+            let services = state.service_ops().list_services().await?;
+            render_partial(&SidebarServicesTemplate { services })
+        }
+        "code" => {
+            let symbols = api::collect_symbols(&state);
+            render_partial(&SidebarSymbolsTemplate { symbols })
+        }
+        "memories" => {
+            let memories: Vec<SidebarMemory> = api::collect_memories(&state)
+                .into_iter()
+                .map(|m| SidebarMemory {
+                    name: m.name,
+                    kind: m.kind,
+                    preview: if m.content_preview.len() > 80 {
+                        format!("{}...", &m.content_preview[..80])
+                    } else {
+                        m.content_preview
+                    },
+                })
+                .collect();
+            render_partial(&SidebarMemoriesTemplate { memories })
+        }
+        "files" => {
+            let files: Vec<SidebarFile> = api::collect_files(&state)
+                .into_iter()
+                .map(|f| {
+                    let name = std::path::Path::new(&f.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&f.path)
+                        .to_string();
+                    SidebarFile {
+                        name,
+                        path: f.path,
+                    }
+                })
+                .collect();
+            render_partial(&SidebarFilesTemplate { files })
+        }
+        "knowledge" => {
+            let store_lock = state.store();
+            let store = store_lock.read().await;
+            let services = dtx_core::model::services_from_config(store.config());
+            drop(store);
+            let graph = api::build_graph(&state, &services);
+
+            let mut edge_count: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for edge in &graph.edges {
+                *edge_count.entry(&edge.source).or_default() += 1;
+                *edge_count.entry(&edge.target).or_default() += 1;
+            }
+
+            let mut entities: Vec<SidebarEntity> = graph
+                .nodes
+                .values()
+                .map(|n| SidebarEntity {
+                    id: n.id.clone(),
+                    domain: format!("{:?}", n.domain).to_lowercase(),
+                    label: n.label.clone(),
+                })
+                .collect();
+
+            entities.sort_by(|a, b| {
+                let ca = edge_count.get(a.id.as_str()).copied().unwrap_or(0);
+                let cb = edge_count.get(b.id.as_str()).copied().unwrap_or(0);
+                cb.cmp(&ca)
+            });
+            entities.truncate(50);
+
+            render_partial(&SidebarEntitiesTemplate { entities })
+        }
+        _ => Err(AppError::bad_request(format!(
+            "Unknown sidebar view: '{view}'"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project switcher
+// ---------------------------------------------------------------------------
+
+pub struct ProjectSwitcherEntry {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Template)]
+#[template(path = "partials/project_switcher.html")]
+pub struct ProjectSwitcherTemplate {
+    pub active_name: String,
+    pub projects: Vec<ProjectSwitcherEntry>,
+}
+
+/// Render the project switcher dropdown.
+pub async fn project_switcher(State(state): State<AppState>) -> AppResult<ProjectSwitcherTemplate> {
+    let list = state.registry().list();
+    let active = state.registry().active();
+    let active_store = active.store().read().await;
+    let active_name = active_store.project_name().to_string();
+    drop(active_store);
+
+    let mut projects = Vec::new();
+    for (id, root, is_active) in &list {
+        let name = if *is_active {
+            active_name.clone()
+        } else {
+            root.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| id.clone())
+        };
+        projects.push(ProjectSwitcherEntry {
+            id: id.clone(),
+            name,
+            active: *is_active,
+        });
+    }
+
+    Ok(ProjectSwitcherTemplate {
+        active_name,
+        projects,
+    })
 }

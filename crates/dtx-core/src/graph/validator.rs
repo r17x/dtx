@@ -1,8 +1,8 @@
 //! Dependency graph validation utilities.
 
+use super::types::EdgeKind;
 use super::DependencyGraph;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 /// Error type for cycle detection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,20 +49,19 @@ impl GraphValidator {
     /// assert!(GraphValidator::validate_no_cycles(&graph).is_ok());
     /// ```
     pub fn validate_no_cycles(graph: &DependencyGraph) -> Result<(), CycleError> {
-        // Use topological sort - if it succeeds, there are no cycles
         if graph.topological_sort().is_some() {
             return Ok(());
         }
 
-        // Find the cycle using DFS
-        let mut visited = HashSet::new();
-        let mut rec_stack = HashSet::new();
+        // Find the cycle using DFS on DependsOn edges
+        let mut visited = std::collections::HashSet::new();
+        let mut rec_stack = std::collections::HashSet::new();
         let mut path = Vec::new();
 
-        for node_name in graph.nodes.keys() {
-            if !visited.contains(node_name) {
+        for node_id in graph.nodes.keys() {
+            if !visited.contains(node_id.as_str()) {
                 if let Some(cycle) =
-                    Self::find_cycle_dfs(node_name, graph, &mut visited, &mut rec_stack, &mut path)
+                    Self::find_cycle_dfs(node_id, graph, &mut visited, &mut rec_stack, &mut path)
                 {
                     return Err(CycleError {
                         message: format!(
@@ -79,66 +78,82 @@ impl GraphValidator {
         Ok(())
     }
 
-    /// Performs DFS to find a cycle in the graph.
+    /// Performs DFS to find a cycle in the graph (follows DependsOn edges only).
     fn find_cycle_dfs(
-        node: &str,
+        node_id: &str,
         graph: &DependencyGraph,
-        visited: &mut HashSet<String>,
-        rec_stack: &mut HashSet<String>,
+        visited: &mut std::collections::HashSet<String>,
+        rec_stack: &mut std::collections::HashSet<String>,
         path: &mut Vec<String>,
     ) -> Option<Vec<String>> {
-        visited.insert(node.to_string());
-        rec_stack.insert(node.to_string());
-        path.push(node.to_string());
+        visited.insert(node_id.to_string());
+        rec_stack.insert(node_id.to_string());
+        path.push(node_id.to_string());
 
-        if let Some(graph_node) = graph.nodes.get(node) {
-            for dep in &graph_node.dependencies {
-                if !visited.contains(dep) {
-                    if let Some(cycle) = Self::find_cycle_dfs(dep, graph, visited, rec_stack, path)
-                    {
-                        return Some(cycle);
-                    }
-                } else if rec_stack.contains(dep) {
-                    // Found a cycle - extract it from the path
-                    let cycle_start = path.iter().position(|n| n == dep).unwrap();
-                    return Some(path[cycle_start..].to_vec());
+        // Follow outgoing DependsOn edges
+        let deps: Vec<String> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::DependsOn && e.source == node_id)
+            .map(|e| e.target.clone())
+            .collect();
+
+        for dep in &deps {
+            if !visited.contains(dep.as_str()) {
+                if let Some(cycle) = Self::find_cycle_dfs(dep, graph, visited, rec_stack, path) {
+                    return Some(cycle);
                 }
+            } else if rec_stack.contains(dep.as_str()) {
+                let cycle_start = path.iter().position(|n| n == dep).unwrap();
+                return Some(path[cycle_start..].to_vec());
             }
         }
 
-        rec_stack.remove(node);
+        rec_stack.remove(node_id);
         path.pop();
         None
     }
 
     /// Checks if adding a dependency would create a cycle.
-    ///
-    /// # Arguments
-    ///
-    /// * `graph` - The current dependency graph
-    /// * `from` - The service that would depend on `to`
-    /// * `to` - The service that `from` would depend on
-    ///
-    /// Returns `true` if adding the dependency would create a cycle.
     pub fn would_create_cycle(graph: &DependencyGraph, from: &str, to: &str) -> bool {
-        // Check if 'from' is already in 'to's dependency chain
-        // If so, adding 'to' as a dependency of 'from' would create a cycle
-        let to_dependencies = graph.get_all_dependencies(to);
-        to_dependencies.contains(&from.to_string())
+        let from_id = if from.starts_with("resource:") {
+            from.to_string()
+        } else {
+            format!("resource:{}", from)
+        };
+        let to_id = if to.starts_with("resource:") {
+            to.to_string()
+        } else {
+            format!("resource:{}", to)
+        };
+        let to_dependencies = graph.get_all_dependencies(&to_id);
+        // get_all_dependencies returns labels, so check against the label of from
+        let from_label = graph
+            .nodes
+            .get(&from_id)
+            .map(|n| n.label.clone())
+            .unwrap_or_else(|| from.to_string());
+        to_dependencies.contains(&from_label)
     }
 
-    /// Validates that all dependencies reference existing services.
+    /// Validates that all DependsOn edge targets exist as nodes in the graph.
     pub fn validate_references(graph: &DependencyGraph) -> Result<(), Vec<String>> {
         let mut invalid = Vec::new();
 
-        for (service_name, node) in &graph.nodes {
-            for dep in &node.dependencies {
-                if !graph.nodes.contains_key(dep) {
-                    invalid.push(format!(
-                        "Service '{}' depends on non-existent service '{}'",
-                        service_name, dep
-                    ));
-                }
+        for edge in &graph.edges {
+            if edge.kind == EdgeKind::DependsOn && !graph.nodes.contains_key(&edge.target) {
+                let source_label = graph
+                    .nodes
+                    .get(&edge.source)
+                    .map(|n| n.label.as_str())
+                    .unwrap_or(&edge.source);
+                invalid.push(format!(
+                    "Service '{}' depends on non-existent service '{}'",
+                    source_label,
+                    edge.target
+                        .strip_prefix("resource:")
+                        .unwrap_or(&edge.target)
+                ));
             }
         }
 
@@ -150,36 +165,6 @@ impl GraphValidator {
     }
 
     /// Validates that enabled services don't depend on disabled services.
-    ///
-    /// This function checks two conditions:
-    /// 1. All dependencies must reference existing services
-    /// 2. Enabled services must not depend on disabled services
-    ///
-    /// Disabled services are skipped from validation since they won't run.
-    ///
-    /// # Arguments
-    ///
-    /// * `services` - The list of services to validate
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` if all enabled services have valid dependencies
-    /// * `Err(Vec<String>)` containing all validation errors found
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use dtx_core::model::Service;
-    /// use dtx_core::graph::GraphValidator;
-    ///
-    /// let services = vec![
-    ///     Service::new("api".to_string(), "node server.js".to_string())
-    ///         .with_dependency("db".to_string(), dtx_core::model::DependencyCondition::ProcessHealthy),
-    ///     Service::new("db".to_string(), "postgres".to_string()),
-    /// ];
-    ///
-    /// assert!(GraphValidator::validate_enabled_dependencies(&services).is_ok());
-    /// ```
     pub fn validate_enabled_dependencies(
         services: &[crate::model::Service],
     ) -> Result<(), Vec<String>> {
@@ -187,25 +172,20 @@ impl GraphValidator {
 
         let mut errors = Vec::new();
 
-        // Create a map of service names to their enabled status
         let service_map: HashMap<&str, bool> = services
             .iter()
             .map(|s| (s.name.as_str(), s.enabled))
             .collect();
 
-        // Check each enabled service
         for service in services {
-            // Skip validation for disabled services (they won't run)
             if !service.enabled {
                 continue;
             }
 
-            // Check dependencies if any exist
             if let Some(ref dependencies) = service.depends_on {
                 for dep in dependencies {
                     let dep_name = dep.service.as_str();
 
-                    // Check if dependency exists
                     match service_map.get(dep_name) {
                         None => {
                             errors.push(format!(
@@ -221,9 +201,7 @@ impl GraphValidator {
                                 service.name, dep_name, service.name, dep_name
                             ));
                         }
-                        Some(&true) => {
-                            // Valid dependency - enabled service depends on enabled service
-                        }
+                        Some(&true) => {}
                     }
                 }
             }
@@ -237,44 +215,11 @@ impl GraphValidator {
     }
 
     /// Validates all aspects of the service dependency graph.
-    ///
-    /// This function performs comprehensive validation:
-    /// 1. Checks for circular dependencies
-    /// 2. Validates that all dependencies reference existing services
-    /// 3. Ensures enabled services don't depend on disabled services
-    ///
-    /// All errors are collected and returned together for better user experience.
-    ///
-    /// # Arguments
-    ///
-    /// * `services` - The list of services to validate
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` if all validations pass
-    /// * `Err(Vec<String>)` containing all validation errors from all checks
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use dtx_core::model::{Service, DependencyCondition};
-    /// use dtx_core::graph::GraphValidator;
-    ///
-    /// let services = vec![
-    ///     Service::new("api".to_string(), "node server.js".to_string())
-    ///         .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
-    ///     Service::new("db".to_string(), "postgres".to_string()),
-    /// ];
-    ///
-    /// assert!(GraphValidator::validate_all(&services).is_ok());
-    /// ```
     pub fn validate_all(services: &[crate::model::Service]) -> Result<(), Vec<String>> {
         let mut all_errors = Vec::new();
 
-        // Build dependency graph for cycle and reference checks
         let graph = DependencyGraph::from_services(services);
 
-        // Check 1: Validate no circular dependencies
         if let Err(cycle_err) = Self::validate_no_cycles(&graph) {
             all_errors.push(format!(
                 "Circular dependency detected: {}. \
@@ -283,12 +228,10 @@ impl GraphValidator {
             ));
         }
 
-        // Check 2: Validate all references exist
         if let Err(mut ref_errors) = Self::validate_references(&graph) {
             all_errors.append(&mut ref_errors);
         }
 
-        // Check 3: Validate enabled dependencies
         if let Err(mut enabled_errors) = Self::validate_enabled_dependencies(services) {
             all_errors.append(&mut enabled_errors);
         }
@@ -333,8 +276,8 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.cycle.len(), 2);
-        assert!(err.cycle.contains(&"a".to_string()));
-        assert!(err.cycle.contains(&"b".to_string()));
+        assert!(err.cycle.iter().any(|s| s.contains("a")));
+        assert!(err.cycle.iter().any(|s| s.contains("b")));
     }
 
     #[test]
@@ -408,7 +351,6 @@ mod tests {
 
     #[test]
     fn test_validate_enabled_dependencies_valid() {
-        // All services enabled, valid dependencies
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
@@ -420,7 +362,6 @@ mod tests {
 
     #[test]
     fn test_validate_enabled_dependencies_depends_on_disabled() {
-        // Enabled service depends on disabled service - should fail
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
@@ -439,7 +380,6 @@ mod tests {
 
     #[test]
     fn test_validate_enabled_dependencies_nonexistent() {
-        // Enabled service depends on non-existent service - should fail
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string()).with_dependency(
                 "nonexistent".to_string(),
@@ -459,7 +399,6 @@ mod tests {
 
     #[test]
     fn test_validate_enabled_dependencies_disabled_service_ignored() {
-        // Disabled service can depend on anything - should pass
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .disabled()
@@ -470,13 +409,11 @@ mod tests {
             Service::new("db".to_string(), "postgres".to_string()),
         ];
 
-        // Should pass because disabled services are not validated
         assert!(GraphValidator::validate_enabled_dependencies(&services).is_ok());
     }
 
     #[test]
     fn test_validate_enabled_dependencies_multiple_errors() {
-        // Multiple validation errors should all be collected
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy)
@@ -492,7 +429,6 @@ mod tests {
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 3);
 
-        // Check that all errors are present
         let error_str = errors.join("\n");
         assert!(error_str.contains("api") && error_str.contains("db"));
         assert!(error_str.contains("api") && error_str.contains("cache"));
@@ -501,7 +437,6 @@ mod tests {
 
     #[test]
     fn test_validate_all_valid_services() {
-        // All validations should pass
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
@@ -514,7 +449,6 @@ mod tests {
 
     #[test]
     fn test_validate_all_cycle_error() {
-        // Should detect circular dependency
         let services = vec![
             Service::new("a".to_string(), "service-a".to_string())
                 .with_dependency("b".to_string(), DependencyCondition::ProcessHealthy),
@@ -533,7 +467,6 @@ mod tests {
 
     #[test]
     fn test_validate_all_multiple_error_types() {
-        // Should collect errors from all validation checks
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string())
                 .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy)
@@ -548,9 +481,6 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        // Should have at least 2 errors:
-        // 1. Reference error for 'nonexistent'
-        // 2. Enabled dependency error for disabled 'db'
         assert!(errors.len() >= 2);
 
         let error_str = errors.join("\n");
@@ -560,8 +490,6 @@ mod tests {
 
     #[test]
     fn test_validate_all_disabled_service_with_invalid_deps() {
-        // Disabled services with invalid deps should be ignored by enabled check
-        // but reference validation runs on graph which includes all services
         let services = vec![
             Service::new("api".to_string(), "node server.js".to_string()),
             Service::new("disabled-service".to_string(), "echo test".to_string())
@@ -573,11 +501,141 @@ mod tests {
         ];
 
         let result = GraphValidator::validate_all(&services);
-        // Should fail because validate_references checks all services in graph
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
         assert!(!errors.is_empty());
         assert!(errors[0].contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_cycle_detection_in_multi_domain_graph() {
+        // Cycles are only checked via DependsOn edges (resource domain).
+        // Cross-domain edges (Configures, References, etc.) should not trigger cycle detection.
+        use super::super::analyzer::GraphSources;
+        use super::super::extract::{MemorySource, SymbolSource};
+
+        let services = vec![
+            Service::new("api".to_string(), "node server.js".to_string())
+                .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
+            Service::new("db".to_string(), "postgres".to_string()),
+        ];
+
+        let symbols = vec![SymbolSource {
+            name: "handle_api_request".into(),
+            kind: "function".into(),
+            file: "src/api.rs".into(),
+            line: 10,
+        }];
+
+        let memories = vec![MemorySource {
+            name: "db-notes".into(),
+            kind: "project".into(),
+            tags: vec!["db".into()],
+            content_preview: "handle_api_request details".into(),
+        }];
+
+        let graph = DependencyGraph::build(GraphSources {
+            services: &services,
+            symbols,
+            memories,
+            files: Vec::new(),
+        });
+
+        // No cycles in resource domain — should pass
+        assert!(GraphValidator::validate_no_cycles(&graph).is_ok());
+    }
+
+    #[test]
+    fn test_validate_references_valid_multi_domain_graph() {
+        let services = vec![
+            Service::new("api".to_string(), "node server.js".to_string())
+                .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy),
+            Service::new("db".to_string(), "postgres".to_string()),
+        ];
+
+        let graph = DependencyGraph::from_services(&services);
+        // All DependsOn edges point to existing nodes
+        assert!(GraphValidator::validate_references(&graph).is_ok());
+    }
+
+    #[test]
+    fn test_validate_references_detects_dangling_edge() {
+        // Manually verify that a graph built with a missing dependency is caught
+        let services = vec![
+            Service::new("api".to_string(), "node server.js".to_string()).with_dependency(
+                "missing-db".to_string(),
+                DependencyCondition::ProcessHealthy,
+            ),
+        ];
+
+        let graph = DependencyGraph::from_services(&services);
+        let result = GraphValidator::validate_references(&graph);
+        assert!(result.is_err());
+
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("missing-db"));
+    }
+
+    #[test]
+    fn test_validate_no_cycles_empty_graph() {
+        let services: Vec<Service> = vec![];
+        let graph = DependencyGraph::from_services(&services);
+        assert!(GraphValidator::validate_no_cycles(&graph).is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_cycles_single_node() {
+        let services = vec![Service::new("solo".to_string(), "echo solo".to_string())];
+        let graph = DependencyGraph::from_services(&services);
+        assert!(GraphValidator::validate_no_cycles(&graph).is_ok());
+    }
+
+    #[test]
+    fn test_validate_all_acyclic_complex_graph() {
+        let services = vec![
+            Service::new("frontend".to_string(), "npm start".to_string())
+                .with_dependency("api".to_string(), DependencyCondition::ProcessHealthy)
+                .with_dependency("cdn".to_string(), DependencyCondition::ProcessStarted),
+            Service::new("api".to_string(), "node server.js".to_string())
+                .with_dependency("db".to_string(), DependencyCondition::ProcessHealthy)
+                .with_dependency("cache".to_string(), DependencyCondition::ProcessStarted),
+            Service::new("db".to_string(), "postgres".to_string()),
+            Service::new("cache".to_string(), "redis-server".to_string()),
+            Service::new("cdn".to_string(), "nginx".to_string()),
+        ];
+
+        assert!(GraphValidator::validate_all(&services).is_ok());
+    }
+
+    #[test]
+    fn test_would_create_cycle_transitive() {
+        // a -> b -> c; adding c -> a would create cycle
+        let services = vec![
+            Service::new("a".to_string(), "cmd-a".to_string())
+                .with_dependency("b".to_string(), DependencyCondition::ProcessHealthy),
+            Service::new("b".to_string(), "cmd-b".to_string())
+                .with_dependency("c".to_string(), DependencyCondition::ProcessHealthy),
+            Service::new("c".to_string(), "cmd-c".to_string()),
+        ];
+
+        let graph = DependencyGraph::from_services(&services);
+
+        assert!(GraphValidator::would_create_cycle(&graph, "c", "a"));
+        // c -> b would also create a cycle since b already depends on c
+        assert!(GraphValidator::would_create_cycle(&graph, "c", "b"));
+        // a -> c would NOT create a cycle (c has no deps that lead back to a)
+        assert!(!GraphValidator::would_create_cycle(&graph, "a", "c"));
+    }
+
+    #[test]
+    fn test_cycle_error_display() {
+        let err = CycleError {
+            cycle: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            message: "test".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("a -> b -> c -> a"));
     }
 }

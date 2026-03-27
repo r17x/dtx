@@ -24,11 +24,13 @@
 
 mod filter;
 mod helpers;
+pub mod instance;
 mod lifecycle;
 mod resource_bus;
 pub mod socket;
 
 pub use filter::EventFilter;
+pub use instance::{find_running_instance, register_instance, InstanceEntry, InstanceGuard};
 pub use lifecycle::{DependencyCondition, LifecycleEvent};
 pub use resource_bus::{ResourceEventBus, ResourceEventSubscriber};
 pub use socket::{

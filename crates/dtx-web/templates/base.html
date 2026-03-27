@@ -184,6 +184,10 @@
                     <kbd class="dtx-modal__shortcut-key">?</kbd>
                 </div>
                 <div class="dtx-modal__shortcut">
+                    <span class="dtx-modal__shortcut-label">Toggle sidebar</span>
+                    <kbd class="dtx-modal__shortcut-key">[</kbd>
+                </div>
+                <div class="dtx-modal__shortcut">
                     <span class="dtx-modal__shortcut-label">Close panels</span>
                     <kbd class="dtx-modal__shortcut-key">ESC</kbd>
                 </div>
@@ -266,6 +270,18 @@
 
             // Skip other shortcuts if in input
             if (isInput) return;
+
+            // [ - toggle sidebar
+            if (e.key === '[') {
+                e.preventDefault();
+                if (typeof cycleSidebar === 'function') {
+                    if (typeof getSidebarState === 'function' && getSidebarState() === 'hidden') {
+                        setSidebarState('expanded');
+                    } else {
+                        cycleSidebar();
+                    }
+                }
+            }
 
             // / - focus terminal
             if (e.key === '/') {

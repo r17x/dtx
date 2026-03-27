@@ -2,35 +2,101 @@
 
 use crate::output::Output;
 use anyhow::Result;
+use dtx_core::events::instance::{find_running_instance, register_instance, InstanceEntry};
 use dtx_core::store::ConfigStore;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Run the web UI.
-pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
+///
+/// If `port` is `Some`, always start a new server on that port.
+/// If `port` is `None`, try to join an existing instance; if none found, start on 3000.
+pub async fn run(out: &Output, port: Option<u16>, open: bool) -> Result<()> {
     let store = ConfigStore::discover_and_load()?;
+    let project_root = store.project_root().to_path_buf();
+
+    match port {
+        Some(p) => start_server(out, store, p, open).await,
+        None => {
+            if let Some(instance) = find_running_instance() {
+                register_with_instance(out, &instance, &project_root, open).await
+            } else {
+                start_server(out, store, 3000, open).await
+            }
+        }
+    }
+}
+
+/// Register this project with an existing web server instance.
+async fn register_with_instance(
+    out: &Output,
+    instance: &InstanceEntry,
+    project_root: &PathBuf,
+    open: bool,
+) -> Result<()> {
+    let base_url = format!("http://127.0.0.1:{}", instance.port);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/projects/register", base_url))
+        .json(&serde_json::json!({ "root": project_root.display().to_string() }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to register with existing instance: {} {}", status, body);
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let project_id = body["id"].as_str().unwrap_or("unknown");
+    let url = format!("{}/?project={}", base_url, project_id);
+
+    out.step("web")
+        .done_untimed(&format!("registered with {}", base_url));
+
+    if open {
+        open_browser(&url);
+    }
+
+    Ok(())
+}
+
+/// Start a new web server instance.
+async fn start_server(out: &Output, store: ConfigStore, port: u16, open: bool) -> Result<()> {
     let project_dir = store.project_root().to_path_buf();
 
-    let state = dtx_web::AppState::new(store);
+    let config = dtx_web::config::WebConfig::from_env();
+    let state = dtx_web::AppState::new(store, config);
 
-    // Clone shutdown token and orchestrator for graceful shutdown
-    let shutdown_token = state.shutdown_token.clone();
-    let orchestrator = state.orchestrator.clone();
+    let shutdown_token = state.shutdown_token().clone();
+    let orchestrator_handle = state.orchestrator_handle().clone();
 
-    // Start Unix socket listener for CLI -> Web event notifications
-    let socket_guard = match dtx_core::events::start_event_listener(state.event_bus.clone()).await {
+    // Register this instance globally for discovery
+    let _instance_guard = match register_instance(port) {
         Ok(guard) => Some(guard),
         Err(e) => {
-            out.warning(&format!("event socket: {}", e));
+            out.warning(&format!("instance registry: {}", e));
             None
         }
     };
 
+    // Start Unix socket listener for CLI -> Web event notifications
+    let socket_guard =
+        match dtx_core::events::start_event_listener(state.event_bus().clone()).await {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                out.warning(&format!("event socket: {}", e));
+                None
+            }
+        };
+
     // Spawn config reload task: when CLI sends ConfigChanged via socket,
     // reload config.yaml from disk so the web UI reflects the change.
     {
-        let store_for_reload = state.store.clone();
-        let bus = state.event_bus.clone();
+        let store_for_reload = state.store().clone();
+        let bus = state.event_bus().clone();
         let filter = dtx_core::EventFilter::new().without_logs();
         let mut sub = bus.subscribe_filtered(filter);
         tokio::spawn(async move {
@@ -52,15 +118,7 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
     out.step("web").done_untimed(&format!("http://{}", addr));
 
     if open {
-        let url = format!("http://{}", addr);
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(&url).spawn();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-        }
+        open_browser(&format!("http://{}", addr));
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -97,19 +155,9 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let stop_future = async {
-            if let Ok(mut orch) =
-                tokio::time::timeout(std::time::Duration::from_secs(2), orchestrator.write()).await
-            {
-                if let Some(ref mut o) = *orch {
-                    let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(3), o.stop_all()).await;
-                }
-                *orch = None;
-            }
-        };
-
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop_future).await;
+        if let Err(e) = orchestrator_handle.shutdown().await {
+            tracing::warn!(error = ?e, "Orchestrator shutdown error");
+        }
 
         stop_step.done("stopped");
     };
@@ -123,6 +171,17 @@ pub async fn run(out: &Output, port: u16, open: bool) -> Result<()> {
     cleanup_sockets(&project_dir);
 
     Ok(())
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 /// Cleans up stale socket files in .dtx directory.

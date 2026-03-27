@@ -1,0 +1,4 @@
+<div id="error-toast" class="fixed top-4 right-4 z-50 bg-red-900/90 border border-red-500 text-red-100 px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-slide-in" role="alert">
+  <span class="text-sm">{{ message }}</span>
+  <button class="text-red-300 hover:text-white" hx-on:click="this.parentElement.remove()">&times;</button>
+</div>

@@ -1,0 +1,28 @@
+<div class="relative" id="project-switcher">
+    <button onclick="document.getElementById('project-dropdown').classList.toggle('hidden')"
+            class="dtx-btn dtx-btn--ghost dtx-btn--sm flex items-center gap-2"
+            aria-label="Switch project"
+            aria-haspopup="true">
+        <span class="dtx-dropdown__icon">&#x25C9;</span>
+        <span class="dtx-dropdown__label">{{ active_name }}</span>
+        {% if projects.len() > 1 %}
+        <span class="text-xs text-gray-500">({{ projects.len() }})</span>
+        {% endif %}
+    </button>
+    {% if projects.len() > 1 %}
+    <div id="project-dropdown" class="hidden absolute top-full left-0 mt-1 bg-dtx-surface border border-dtx-border rounded shadow-lg z-50 min-w-48" role="menu">
+        {% for project in projects %}
+        <button
+            role="menuitem"
+            class="w-full text-left px-3 py-2 text-sm hover:bg-dtx-hover flex items-center gap-2 {% if project.active %}text-status-active{% else %}text-gray-300{% endif %}"
+            hx-put="/api/projects/{{ project.id }}/activate"
+            hx-swap="none"
+            hx-on::after-request="window.location.reload()">
+            {% if project.active %}<span class="text-status-active">&#x25CF;</span>{% else %}<span class="text-gray-600">&#x25CB;</span>{% endif %}
+            <span class="truncate">{{ project.name }}</span>
+            <span class="text-xs text-gray-600 ml-auto">{{ project.id }}</span>
+        </button>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>

@@ -313,9 +313,9 @@ pub enum Commands {
 
     /// Start the web UI
     Web {
-        /// Port to listen on
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        /// Port to listen on (omit to auto-detect or join existing instance)
+        #[arg(short, long)]
+        port: Option<u16>,
 
         /// Open browser after starting
         #[arg(short, long)]

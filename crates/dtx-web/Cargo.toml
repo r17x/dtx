@@ -9,6 +9,8 @@ description = "Web server for dtx - Axum handlers and templates"
 
 [dependencies]
 dtx-core = { workspace = true }
+dtx-code = { workspace = true }
+dtx-memory = { workspace = true }
 dtx-process = { workspace = true }
 
 axum = { workspace = true }
@@ -27,6 +29,7 @@ askama_axum = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+indexmap = { workspace = true }
 rust-embed = "8"
 mime_guess = "2"
 

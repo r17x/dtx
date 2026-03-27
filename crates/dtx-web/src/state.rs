@@ -1,53 +1,127 @@
 //! Application state for web server.
 
+use dtx_code::WorkspaceIndex;
 use dtx_core::events::ResourceEventBus;
 use dtx_core::store::ConfigStore;
 use dtx_core::NixClient;
-use dtx_process::ResourceOrchestrator;
-use std::sync::atomic::AtomicBool;
+use dtx_memory::MemoryStore;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::WebConfig;
+use crate::registry::{build_project_state, ProjectRegistry, ProjectState};
+use crate::service::{OrchestratorHandle, ServiceOps};
 use crate::sse::ConnectionTracker;
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    /// Configuration store (config.yaml as single source of truth).
-    pub store: Arc<RwLock<ConfigStore>>,
-    /// Nix client for package operations.
-    pub nix_client: Arc<NixClient>,
-    /// Resource orchestrator - optional, set when services are running.
-    pub orchestrator: Arc<RwLock<Option<ResourceOrchestrator>>>,
-    /// SSE connection tracker.
-    pub sse_tracker: Arc<ConnectionTracker>,
-    /// Resource event bus for lifecycle event distribution.
-    pub event_bus: Arc<ResourceEventBus>,
-    /// Server start time for uptime calculation.
-    pub server_started_at: Instant,
-    /// Console logger running flag (prevents duplicate loggers).
-    pub console_logger_running: Arc<AtomicBool>,
-    /// Cancellation token for background tasks.
-    pub shutdown_token: CancellationToken,
+    registry: Arc<ProjectRegistry>,
+    nix_client: Arc<NixClient>,
+    sse_tracker: Arc<ConnectionTracker>,
+    event_bus: Arc<ResourceEventBus>,
+    config: Arc<WebConfig>,
+    server_started_at: Instant,
+    shutdown_token: CancellationToken,
 }
 
 impl AppState {
-    /// Creates a new AppState with the given ConfigStore.
-    pub fn new(store: ConfigStore) -> Self {
+    /// Creates a new AppState with the given ConfigStore and WebConfig.
+    pub fn new(store: ConfigStore, config: WebConfig) -> Self {
         let nix_client = Arc::new(NixClient::new());
+        let event_bus = Arc::new(ResourceEventBus::new());
+        let config = Arc::new(config);
+
+        let initial_project = build_project_state(store, &event_bus, &config);
+        let registry = Arc::new(ProjectRegistry::new(initial_project));
 
         Self {
-            store: Arc::new(RwLock::new(store)),
+            registry,
             nix_client,
-            orchestrator: Arc::new(RwLock::new(None)),
-            sse_tracker: Arc::new(ConnectionTracker::new()),
-            event_bus: Arc::new(ResourceEventBus::new()),
+            sse_tracker: ConnectionTracker::new(),
+            event_bus,
+            config,
             server_started_at: Instant::now(),
-            console_logger_running: Arc::new(AtomicBool::new(false)),
             shutdown_token: CancellationToken::new(),
         }
+    }
+
+    // --- Registry ---
+
+    pub fn registry(&self) -> &Arc<ProjectRegistry> {
+        &self.registry
+    }
+
+    // --- Convenience accessors delegating to active project ---
+
+    /// Get the active project's store.
+    pub fn store(&self) -> Arc<RwLock<ConfigStore>> {
+        let project = self.registry.active();
+        project.store().clone()
+    }
+
+    /// Get the active project's orchestrator handle.
+    pub fn orchestrator_handle(&self) -> Arc<OrchestratorHandle> {
+        let project = self.registry.active();
+        project.orchestrator_handle().clone()
+    }
+
+    /// Get the active project's workspace index.
+    pub fn workspace_index(&self) -> Arc<WorkspaceIndex> {
+        let project = self.registry.active();
+        project.workspace_index().clone()
+    }
+
+    /// Get the active project's memory store.
+    pub fn memory_store(&self) -> Option<Arc<MemoryStore>> {
+        let project = self.registry.active();
+        project.memory_store().cloned()
+    }
+
+    pub fn nix_client(&self) -> &Arc<NixClient> {
+        &self.nix_client
+    }
+
+    pub fn event_bus(&self) -> &Arc<ResourceEventBus> {
+        &self.event_bus
+    }
+
+    pub fn sse_tracker(&self) -> &Arc<ConnectionTracker> {
+        &self.sse_tracker
+    }
+
+    pub fn config(&self) -> &Arc<WebConfig> {
+        &self.config
+    }
+
+    pub fn shutdown_token(&self) -> &CancellationToken {
+        &self.shutdown_token
+    }
+
+    pub fn server_started_at(&self) -> Instant {
+        self.server_started_at
+    }
+
+    // --- Service constructors ---
+
+    /// Create a ServiceOps instance from the active project.
+    pub fn service_ops(&self) -> ServiceOps {
+        ServiceOps::new(
+            self.store(),
+            self.nix_client.clone(),
+            self.event_bus.clone(),
+        )
+    }
+
+    /// Create a ServiceOps for a specific project.
+    pub fn service_ops_for(&self, project: &ProjectState) -> ServiceOps {
+        ServiceOps::new(
+            project.store().clone(),
+            self.nix_client.clone(),
+            self.event_bus.clone(),
+        )
     }
 
     /// Returns the server uptime in seconds.

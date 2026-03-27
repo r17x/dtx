@@ -43,6 +43,9 @@ dtx-code = { workspace = true, optional = true }
 # Memory store (optional)
 dtx-memory = { workspace = true, optional = true }
 
+# Core graph types (optional)
+dtx-core = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
@@ -53,6 +56,7 @@ websocket = ["dep:tokio-tungstenite"]
 axum = ["dep:axum"]
 code = ["dep:dtx-code"]
 memory = ["dep:dtx-memory"]
+graph = ["dep:dtx-core"]
 
 [lints]
 workspace = true
