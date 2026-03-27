@@ -11,17 +11,322 @@ use dtx_core::export::{
     DockerComposeExporter, ExportFormat, ExportableProject, ExportableService, Exporter,
     KubernetesExporter, ProcessComposeExporter,
 };
-use dtx_core::graph::DependencyGraph;
+use dtx_code::EntryKind;
+use dtx_core::graph::{DependencyGraph, GraphNode, GraphSources, MemorySource, SymbolSource};
 use dtx_core::model::Service as ModelService;
 use dtx_core::resource::{ResourceId, ResourceState};
-use dtx_core::{GraphValidator, ServiceName};
+use dtx_core::{
+    EdgeConfidence, EdgeKind, FileSource, GraphEdge, GraphStats, GraphValidator, GraphView,
+    ImpactSet, NodeDomain, NodeMetadata, ServiceName,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
 use crate::service::ops::{CreateServiceParams, EditableFileType, UpdateServiceParams};
 use crate::state::AppState;
 use crate::types::ProcessResponse;
+
+/// Build a multi-domain graph from all available sources.
+pub(crate) fn build_graph(state: &AppState, services: &[ModelService]) -> DependencyGraph {
+    let symbols = collect_symbols(state);
+    let memories = collect_memories(state);
+    let files = collect_files(state);
+
+    DependencyGraph::build(GraphSources {
+        services,
+        symbols,
+        memories,
+        files,
+    })
+}
+
+pub(crate) fn collect_symbols(state: &AppState) -> Vec<SymbolSource> {
+    let idx = state.workspace_index();
+    let files = idx.list_files();
+    let mut symbols = Vec::new();
+    for file in &files {
+        if let Ok(file_symbols) = idx.symbols_in_file(file) {
+            let file_str = file.to_string_lossy().to_string();
+            for sym in file_symbols {
+                symbols.push(SymbolSource {
+                    name: sym.name_path.clone(),
+                    kind: format!("{:?}", sym.kind).to_lowercase(),
+                    file: file_str.clone(),
+                    line: sym.start_line,
+                });
+            }
+        }
+    }
+    symbols
+}
+
+pub(crate) fn collect_memories(state: &AppState) -> Vec<MemorySource> {
+    let Some(store) = state.memory_store() else {
+        return Vec::new();
+    };
+    let Ok(metas) = store.list() else {
+        return Vec::new();
+    };
+    metas
+        .into_iter()
+        .filter_map(|meta| {
+            let content_preview = store
+                .read(&meta.name)
+                .ok()
+                .map(|m| m.content.chars().take(200).collect::<String>())
+                .unwrap_or_default();
+            Some(MemorySource {
+                name: meta.name,
+                kind: format!("{:?}", meta.kind).to_lowercase(),
+                tags: meta.tags,
+                content_preview,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn collect_files(state: &AppState) -> Vec<FileSource> {
+    let idx = state.workspace_index();
+    let Ok(entries) = idx.list_dir_with_depth(std::path::Path::new("."), true, Some(2)) else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let kind = match entry.entry_type {
+                EntryKind::Dir => "directory",
+                EntryKind::File => "file",
+            };
+            let extension = std::path::Path::new(&entry.name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_string());
+            FileSource {
+                path: entry.name,
+                kind: kind.to_string(),
+                extension,
+                size: entry.size,
+            }
+        })
+        .collect()
+}
+
+/// Aggregate large graphs by collapsing symbols into per-file group nodes.
+fn aggregate_graph(mut graph: DependencyGraph, threshold: usize) -> DependencyGraph {
+    let symbol_count = graph
+        .nodes
+        .values()
+        .filter(|n| n.domain == NodeDomain::Symbol)
+        .count();
+
+    if symbol_count <= threshold {
+        return graph;
+    }
+
+    // Group symbol node IDs by their file path
+    let mut file_groups: HashMap<String, Vec<String>> = HashMap::new();
+    for node in graph.nodes.values() {
+        if let NodeMetadata::Symbol { ref file, .. } = node.metadata {
+            file_groups
+                .entry(file.clone())
+                .or_default()
+                .push(node.id.clone());
+        }
+    }
+
+    // For each file group, replace individual symbols with a single group node
+    let mut nodes_to_remove: Vec<String> = Vec::new();
+    let mut group_nodes: Vec<GraphNode> = Vec::new();
+
+    for (file, symbol_ids) in &file_groups {
+        let group_id = format!("group:symbol:{}", file);
+        let label = std::path::Path::new(file)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(file)
+            .to_string();
+
+        group_nodes.push(GraphNode {
+            id: group_id,
+            domain: NodeDomain::Group,
+            label,
+            metadata: NodeMetadata::Group {
+                child_domain: NodeDomain::Symbol,
+                count: symbol_ids.len(),
+                representative: file.clone(),
+            },
+            depth: 0,
+        });
+
+        nodes_to_remove.extend(symbol_ids.iter().cloned());
+    }
+
+    // Build set of removed IDs → their group ID for edge redirection
+    let mut redirect: HashMap<String, String> = HashMap::new();
+    for (file, symbol_ids) in &file_groups {
+        let group_id = format!("group:symbol:{}", file);
+        for sid in symbol_ids {
+            redirect.insert(sid.clone(), group_id.clone());
+        }
+    }
+
+    // Remove individual symbol nodes
+    for id in &nodes_to_remove {
+        graph.nodes.remove(id);
+    }
+
+    // Add group nodes
+    for node in group_nodes {
+        graph.nodes.insert(node.id.clone(), node);
+    }
+
+    // Redirect edges and deduplicate
+    let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
+    let mut new_edges = Vec::new();
+
+    for mut edge in graph.edges {
+        if let Some(group_id) = redirect.get(&edge.source) {
+            edge.source = group_id.clone();
+        }
+        if let Some(group_id) = redirect.get(&edge.target) {
+            edge.target = group_id.clone();
+        }
+        // Skip edges where source or target no longer exists
+        if !graph.nodes.contains_key(&edge.source) || !graph.nodes.contains_key(&edge.target) {
+            continue;
+        }
+        // Skip self-loops
+        if edge.source == edge.target {
+            continue;
+        }
+        let key = (
+            edge.source.clone(),
+            edge.target.clone(),
+            format!("{:?}", edge.kind),
+        );
+        if seen_edges.insert(key) {
+            new_edges.push(edge);
+        }
+    }
+
+    graph.edges = new_edges;
+
+    // Derive inter-group edges so single-domain views retain connectivity.
+    // Pattern 1: group→non-group — groups sharing a common target get connected.
+    // Pattern 2: non-group→group — groups sharing a common source get connected.
+    let mut pivot_to_groups: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &graph.edges {
+        let source_is_group = graph
+            .nodes
+            .get(&edge.source)
+            .is_some_and(|n| n.is_group());
+        let target_is_group = graph
+            .nodes
+            .get(&edge.target)
+            .is_some_and(|n| n.is_group());
+
+        if source_is_group && !target_is_group {
+            pivot_to_groups
+                .entry(edge.target.clone())
+                .or_default()
+                .push(edge.source.clone());
+        } else if !source_is_group && target_is_group {
+            pivot_to_groups
+                .entry(edge.source.clone())
+                .or_default()
+                .push(edge.target.clone());
+        }
+    }
+
+    let mut inter_group_seen: HashSet<(String, String)> = HashSet::new();
+    for groups in pivot_to_groups.values() {
+        if groups.len() < 2 {
+            continue;
+        }
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                let (a, b) = if groups[i] < groups[j] {
+                    (&groups[i], &groups[j])
+                } else {
+                    (&groups[j], &groups[i])
+                };
+                if inter_group_seen.insert((a.clone(), b.clone())) {
+                    graph.edges.push(GraphEdge {
+                        source: a.clone(),
+                        target: b.clone(),
+                        kind: EdgeKind::References,
+                        confidence: EdgeConfidence::Speculative,
+                    });
+                }
+            }
+        }
+    }
+
+    // Recompute roots and leaves from the aggregated node/edge sets
+    let node_ids: HashSet<&str> = graph.nodes.keys().map(|s| s.as_str()).collect();
+    let has_incoming: HashSet<&str> = graph.edges.iter().map(|e| e.target.as_str()).collect();
+    let has_outgoing: HashSet<&str> = graph.edges.iter().map(|e| e.source.as_str()).collect();
+    graph.roots = node_ids
+        .difference(&has_incoming)
+        .map(|s| s.to_string())
+        .collect();
+    graph.leaves = node_ids
+        .difference(&has_outgoing)
+        .map(|s| s.to_string())
+        .collect();
+
+    graph
+}
+
+/// Expand a group node into its individual children, returning a partial graph.
+fn expand_group_node(state: &AppState, node_id: &str) -> Option<DependencyGraph> {
+    // Parse group:symbol:{file_path}
+    let file_path = node_id.strip_prefix("group:symbol:")?;
+
+    let idx = state.workspace_index();
+    let file_symbols = idx.symbols_in_file(std::path::Path::new(file_path)).ok()?;
+
+    let mut nodes = HashMap::new();
+    let mut edges = Vec::new();
+
+    for sym in file_symbols {
+        let id = format!("symbol:{}", sym.name_path);
+        nodes.insert(
+            id.clone(),
+            GraphNode {
+                id,
+                domain: NodeDomain::Symbol,
+                label: sym.name_path.clone(),
+                metadata: NodeMetadata::Symbol {
+                    kind: format!("{:?}", sym.kind).to_lowercase(),
+                    file: file_path.to_string(),
+                    line: sym.start_line,
+                },
+                depth: 0,
+            },
+        );
+    }
+
+    // Build edges between these symbols and any visible nodes
+    // For now, return just the symbol nodes — the frontend can re-fetch if needed
+    let _ = &mut edges;
+
+    Some(DependencyGraph {
+        roots: Vec::new(),
+        leaves: Vec::new(),
+        max_depth: 0,
+        domains: dtx_core::DomainStatus {
+            resource: false,
+            symbol: true,
+            memory: false,
+            file: false,
+        },
+        nodes,
+        edges,
+    })
+}
 
 // === Project ===
 
@@ -73,6 +378,12 @@ pub async fn init_cwd(
             path: info.path,
         }),
     ))
+}
+
+/// Query parameter for project selection.
+#[derive(Deserialize, Default)]
+pub struct ProjectQuery {
+    pub project: Option<String>,
 }
 
 // === Services ===
@@ -163,7 +474,8 @@ pub async fn start_services(State(state): State<AppState>) -> AppResult<Json<Pro
     let services = state.service_ops().list_services().await?;
     let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
     let project_name = store.project_name().to_string();
     drop(store);
@@ -205,7 +517,8 @@ pub async fn restart_services(State(state): State<AppState>) -> AppResult<Json<P
     let services = state.service_ops().list_services().await?;
     let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
     let project_name = store.project_name().to_string();
     drop(store);
@@ -311,12 +624,8 @@ pub async fn get_status(State(state): State<AppState>) -> AppResult<Json<serde_j
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: String,
-    #[serde(default = "default_limit")]
+    #[serde(default = "crate::config::WebConfig::default_search_limit")]
     pub limit: usize,
-}
-
-fn default_limit() -> usize {
-    crate::config::WebConfig::default().default_search_limit
 }
 
 /// Search for Nix packages.
@@ -663,7 +972,8 @@ pub async fn export_config(
         .parse()
         .map_err(|e: dtx_core::ExportError| AppError::bad_request(e.to_string()))?;
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_name = store.project_name().to_string();
 
@@ -709,12 +1019,8 @@ pub async fn export_config(
 #[derive(Debug, Deserialize)]
 pub struct ImportRequest {
     pub content: String,
-    #[serde(default = "default_import_format")]
+    #[serde(default = "crate::config::WebConfig::default_import_format")]
     pub format: String,
-}
-
-fn default_import_format() -> String {
-    "auto".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -742,60 +1048,81 @@ pub async fn import_config(
 
 // === Dependency Graph ===
 
-#[derive(Debug, Serialize)]
-pub struct GraphNodeResponse {
-    pub id: String,
-    pub depth: usize,
-    pub dependencies: Vec<String>,
-    pub dependents: Vec<String>,
+#[derive(Debug, Deserialize)]
+pub struct GraphParams {
+    #[serde(default = "default_graph_view")]
+    pub view: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct GraphEdgeResponse {
-    pub source: String,
-    pub target: String,
+fn default_graph_view() -> String {
+    "knowledge".to_string()
 }
 
-#[derive(Debug, Serialize)]
-pub struct GraphResponse {
-    pub nodes: Vec<GraphNodeResponse>,
-    pub edges: Vec<GraphEdgeResponse>,
-    pub roots: Vec<String>,
-    pub max_depth: usize,
-}
+const SYMBOL_AGGREGATION_THRESHOLD: usize = 150;
 
-pub async fn get_dependency_graph(State(state): State<AppState>) -> AppResult<Json<GraphResponse>> {
-    let store = state.store().read().await;
+/// Get the unified knowledge graph, optionally filtered by view.
+pub async fn get_graph(
+    State(state): State<AppState>,
+    Query(params): Query<GraphParams>,
+) -> AppResult<Json<DependencyGraph>> {
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let services = dtx_core::model::services_from_config(store.config());
-    let graph = DependencyGraph::from_services(&services);
+    let graph = build_graph(&state, &services);
+    let graph = aggregate_graph(graph, SYMBOL_AGGREGATION_THRESHOLD);
 
-    let nodes: Vec<GraphNodeResponse> = graph
-        .nodes
-        .values()
-        .map(|node| GraphNodeResponse {
-            id: node.name.clone(),
-            depth: node.depth,
-            dependencies: node.dependencies.clone(),
-            dependents: node.dependents.clone(),
-        })
-        .collect();
-
-    let mut edges = Vec::new();
-    for node in graph.nodes.values() {
-        for dep in &node.dependencies {
-            edges.push(GraphEdgeResponse {
-                source: node.name.clone(),
-                target: dep.clone(),
-            });
+    let view = match params.view.as_str() {
+        "knowledge" => GraphView::Knowledge,
+        "processes" => GraphView::Processes,
+        "code" => GraphView::Code,
+        "memories" => GraphView::Memories,
+        "files" => GraphView::Files,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "Unknown graph view: '{other}'"
+            )))
         }
-    }
+    };
 
-    Ok(Json(GraphResponse {
-        nodes,
-        edges,
-        roots: graph.roots,
-        max_depth: graph.max_depth,
-    }))
+    let filtered = graph.filter_by_view(view);
+    Ok(Json(filtered))
+}
+
+/// Expand a group node, returning its children as a partial graph.
+pub async fn expand_node(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> AppResult<Json<DependencyGraph>> {
+    // Axum wildcard captures include a leading '/'
+    let node_id = node_id.strip_prefix('/').unwrap_or(&node_id);
+    let graph = expand_group_node(&state, node_id).ok_or_else(|| {
+        AppError::not_found(format!("Cannot expand node '{}'", node_id))
+    })?;
+    Ok(Json(graph))
+}
+
+/// Get the impact set for a specific node.
+pub async fn get_impact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<ImpactSet>> {
+    let store_lock = state.store();
+    let store = store_lock.read().await;
+    let services = dtx_core::model::services_from_config(store.config());
+    let graph = build_graph(&state, &services);
+
+    let impact = graph.impact(&id, EdgeConfidence::Speculative);
+    Ok(Json(impact))
+}
+
+/// Get graph statistics.
+pub async fn get_graph_stats(State(state): State<AppState>) -> AppResult<Json<GraphStats>> {
+    let store_lock = state.store();
+    let store = store_lock.read().await;
+    let services = dtx_core::model::services_from_config(store.config());
+    let graph = build_graph(&state, &services);
+
+    Ok(Json(graph.stats()))
 }
 
 // === Update Dependencies ===
@@ -817,7 +1144,8 @@ pub async fn update_dependencies(
     Path(name): Path<String>,
     Json(req): Json<UpdateDepsRequest>,
 ) -> AppResult<Json<UpdateDepsResponse>> {
-    let mut store = state.store().write().await;
+    let store_lock = state.store();
+    let mut store = store_lock.write().await;
 
     if store.get_resource(&name).is_none() {
         return Err(AppError::not_found(format!("Service '{}' not found", name)));
@@ -866,4 +1194,92 @@ pub async fn update_dependencies(
         service: name,
         depends_on: req.depends_on,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Project management endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RegisterProjectRequest {
+    pub root: String,
+}
+
+#[derive(Serialize)]
+pub struct RegisterProjectResponse {
+    pub id: String,
+    pub url: String,
+}
+
+/// Register a new project with this server instance.
+pub async fn register_project(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterProjectRequest>,
+) -> AppResult<Json<RegisterProjectResponse>> {
+    let root = PathBuf::from(&req.root);
+
+    let store = dtx_core::store::ConfigStore::discover_and_load_from(&root)
+        .map_err(|e| AppError::bad_request(format!("Cannot load project at '{}': {}", req.root, e)))?;
+
+    let id = state
+        .registry()
+        .add(store, state.event_bus(), state.config())
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    Ok(Json(RegisterProjectResponse {
+        id: id.clone(),
+        url: format!("/?project={}", id),
+    }))
+}
+
+#[derive(Serialize)]
+pub struct ProjectListEntry {
+    pub id: String,
+    pub root: String,
+    pub active: bool,
+}
+
+/// List all registered projects.
+pub async fn list_projects(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<ProjectListEntry>>> {
+    let projects = state.registry().list();
+    let entries: Vec<_> = projects
+        .into_iter()
+        .map(|(id, root, active)| ProjectListEntry {
+            id,
+            root: root.display().to_string(),
+            active,
+        })
+        .collect();
+    Ok(Json(entries))
+}
+
+/// Activate a project by ID.
+pub async fn activate_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    state
+        .registry()
+        .set_active(&id)
+        .map_err(|e| AppError::not_found(e))?;
+
+    Ok(Json(serde_json::json!({ "status": "activated", "id": id })))
+}
+
+/// Remove a project by ID.
+pub async fn remove_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let removed = state.registry().remove(&id);
+    match removed {
+        Some(_) => Ok(Json(
+            serde_json::json!({ "status": "removed", "id": id }),
+        )),
+        None => Err(AppError::bad_request(
+            "Cannot remove active project".to_string(),
+        )),
+    }
 }

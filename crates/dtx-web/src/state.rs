@@ -1,23 +1,25 @@
 //! Application state for web server.
 
+use dtx_code::WorkspaceIndex;
 use dtx_core::events::ResourceEventBus;
 use dtx_core::store::ConfigStore;
 use dtx_core::NixClient;
+use dtx_memory::MemoryStore;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::WebConfig;
+use crate::registry::{build_project_state, ProjectRegistry, ProjectState};
 use crate::service::{OrchestratorHandle, ServiceOps};
 use crate::sse::ConnectionTracker;
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    store: Arc<RwLock<ConfigStore>>,
+    registry: Arc<ProjectRegistry>,
     nix_client: Arc<NixClient>,
-    orchestrator_handle: Arc<OrchestratorHandle>,
     sse_tracker: Arc<ConnectionTracker>,
     event_bus: Arc<ResourceEventBus>,
     config: Arc<WebConfig>,
@@ -32,13 +34,12 @@ impl AppState {
         let event_bus = Arc::new(ResourceEventBus::new());
         let config = Arc::new(config);
 
-        let orchestrator_handle =
-            Arc::new(OrchestratorHandle::new(event_bus.clone(), config.clone()));
+        let initial_project = build_project_state(store, &event_bus, &config);
+        let registry = Arc::new(ProjectRegistry::new(initial_project));
 
         Self {
-            store: Arc::new(RwLock::new(store)),
+            registry,
             nix_client,
-            orchestrator_handle,
             sse_tracker: ConnectionTracker::new(),
             event_bus,
             config,
@@ -47,10 +48,36 @@ impl AppState {
         }
     }
 
-    // --- Accessor methods ---
+    // --- Registry ---
 
-    pub fn store(&self) -> &Arc<RwLock<ConfigStore>> {
-        &self.store
+    pub fn registry(&self) -> &Arc<ProjectRegistry> {
+        &self.registry
+    }
+
+    // --- Convenience accessors delegating to active project ---
+
+    /// Get the active project's store.
+    pub fn store(&self) -> Arc<RwLock<ConfigStore>> {
+        let project = self.registry.active();
+        project.store().clone()
+    }
+
+    /// Get the active project's orchestrator handle.
+    pub fn orchestrator_handle(&self) -> Arc<OrchestratorHandle> {
+        let project = self.registry.active();
+        project.orchestrator_handle().clone()
+    }
+
+    /// Get the active project's workspace index.
+    pub fn workspace_index(&self) -> Arc<WorkspaceIndex> {
+        let project = self.registry.active();
+        project.workspace_index().clone()
+    }
+
+    /// Get the active project's memory store.
+    pub fn memory_store(&self) -> Option<Arc<MemoryStore>> {
+        let project = self.registry.active();
+        project.memory_store().cloned()
     }
 
     pub fn nix_client(&self) -> &Arc<NixClient> {
@@ -79,18 +106,22 @@ impl AppState {
 
     // --- Service constructors ---
 
-    /// Create a ServiceOps instance from the shared state components.
+    /// Create a ServiceOps instance from the active project.
     pub fn service_ops(&self) -> ServiceOps {
         ServiceOps::new(
-            self.store.clone(),
+            self.store(),
             self.nix_client.clone(),
             self.event_bus.clone(),
         )
     }
 
-    /// Get a reference to the OrchestratorHandle.
-    pub fn orchestrator_handle(&self) -> &Arc<OrchestratorHandle> {
-        &self.orchestrator_handle
+    /// Create a ServiceOps for a specific project.
+    pub fn service_ops_for(&self, project: &ProjectState) -> ServiceOps {
+        ServiceOps::new(
+            project.store().clone(),
+            self.nix_client.clone(),
+            self.event_bus.clone(),
+        )
     }
 
     /// Returns the server uptime in seconds.

@@ -49,7 +49,8 @@ pub async fn index(
 ) -> AppResult<IndexTemplate> {
     let services = state.service_ops().list_services().await?;
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_name = store.project_name().to_string();
     drop(store);
 
@@ -168,7 +169,8 @@ pub async fn mappings_page(State(state): State<AppState>) -> AppResult<MappingsT
         description: info.description,
     };
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let services = dtx_core::model::services_from_config(store.config());
     let project_root = store.project_root().to_path_buf();
     drop(store);

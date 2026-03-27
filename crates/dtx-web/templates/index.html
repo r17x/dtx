@@ -24,10 +24,12 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
 {% endblock %}
 
 {% block header_actions %}
-<!-- Project Context -->
-<div class="flex items-center gap-2">
-    <span class="dtx-dropdown__icon">&#x25C9;</span>
-    <span class="dtx-dropdown__label">{{ current_context }}</span>
+<!-- Project Switcher -->
+<div hx-get="/htmx/partials/project-switcher" hx-trigger="load" hx-swap="innerHTML">
+    <div class="flex items-center gap-2">
+        <span class="dtx-dropdown__icon">&#x25C9;</span>
+        <span class="dtx-dropdown__label">{{ current_context }}</span>
+    </div>
 </div>
 
 {% if has_project %}
@@ -40,84 +42,56 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
 {% endblock %}
 
 {% block content %}
-<div class="dtx-command-center">
+<div class="dtx-command-center" data-sidebar="expanded">
     <!-- Left Panel: Activity Feed -->
     <aside class="dtx-command-center__sidebar">
+        <button class="dtx-sidebar-toggle" onclick="cycleSidebar()" aria-label="Toggle sidebar" title="Toggle sidebar ([)">
+            <span class="dtx-sidebar-toggle__icon"></span>
+        </button>
         {% if has_project %}
         <div class="dtx-activity-feed">
-            <header class="dtx-activity-feed__header">
+            <!-- View Selector -->
+            <div class="dtx-view-selector">
+                <button class="dtx-view-item dtx-view-item--active" onclick="switchView('knowledge')" id="view-knowledge" data-tooltip="KNOWLEDGE">
+                    <span class="dtx-view-item__icon dtx-view-item__icon--knowledge">&#x25CE;</span>
+                    <span class="dtx-view-item__label">KNOWLEDGE</span>
+                </button>
+                <button class="dtx-view-item" onclick="switchView('processes')" id="view-processes" data-tooltip="PROCESSES">
+                    <span class="dtx-view-item__icon dtx-view-item__icon--processes">&#x25CF;</span>
+                    <span class="dtx-view-item__label">PROCESSES</span>
+                </button>
+                <button class="dtx-view-item" onclick="switchView('code')" id="view-code" data-tooltip="CODE">
+                    <span class="dtx-view-item__icon dtx-view-item__icon--code">&#x25C6;</span>
+                    <span class="dtx-view-item__label">CODE</span>
+                </button>
+                <button class="dtx-view-item" onclick="switchView('memories')" id="view-memories" data-tooltip="MEMORIES">
+                    <span class="dtx-view-item__icon dtx-view-item__icon--memories">&#x25A0;</span>
+                    <span class="dtx-view-item__label">MEMORIES</span>
+                </button>
+                <button class="dtx-view-item" onclick="switchView('files')" id="view-files" data-tooltip="FILES">
+                    <span class="dtx-view-item__icon dtx-view-item__icon--files">&#x25B2;</span>
+                    <span class="dtx-view-item__label">FILES</span>
+                </button>
+            </div>
+
+            <header class="dtx-activity-feed__header" id="sidebar-header">
                 <h2 class="dtx-activity-feed__title">
-                    <span class="dtx-activity-feed__title-icon">&#x2699;</span>
-                    SERVICES
+                    <span class="dtx-activity-feed__title-icon" id="sidebar-header-icon">&#x25CE;</span>
+                    <span id="sidebar-header-title">ENTITIES</span>
                 </h2>
-                <div class="flex items-center gap-2">
-                    <span class="dtx-activity-feed__count">{{ services.len() }}</span>
-                    <button onclick="showAddServiceModal()"
-                            class="text-gray-500 hover:text-status-active text-sm leading-none"
-                            title="Add Service">
-                        +
-                    </button>
+                <div class="flex items-center gap-2" id="sidebar-header-actions">
+                    <span class="dtx-activity-feed__count" id="sidebar-header-count">{{ services.len() }}</span>
                 </div>
             </header>
 
             <div class="dtx-activity-feed__list"
-                 id="service-list">
-
-                {% if services.is_empty() %}
-                <div class="px-4 py-8 text-center dtx-text-muted">
-                    <p>No services configured</p>
-                    <p class="text-xs mt-2">Run <code>dtx add &lt;service&gt;</code> to add one</p>
-                </div>
-                {% else %}
-                    {% for service in services %}
-                    <div class="group relative">
-                    <button class="dtx-activity-item"
-                            hx-get="/htmx/services/{{ service.name }}"
-                            hx-target="#detail-panel"
-                            hx-swap="innerHTML"
-                            hx-indicator=".dtx-activity-item__loading"
-                            onclick="openDetailPanel()"
-                            data-service-name="{{ service.name }}">
-
-                        <div class="dtx-activity-item__header">
-                            <div class="dtx-activity-item__service">
-                                <span>{{ service.name }}</span>
-                                <span class="dtx-activity-item__status-dot dtx-activity-item__status-dot--stopped"
-                                      id="status-dot-{{ service.name }}"
-                                      data-service-name="{{ service.name }}"></span>
-                            </div>
-                            <span class="dtx-activity-item__port">
-                                {% match service.port %}{% when Some with (port) %}:{{ port }}{% when None %}{% endmatch %}
-                            </span>
-                        </div>
-
-                        <p class="dtx-activity-item__message">
-                            {% match service.package %}
-                            {% when Some with (pkg) %}
-                            <span class="text-status-ephemeral">{{ pkg }}</span>
-                            {% when None %}
-                            <span class="text-gray-500">{{ service.command }}</span>
-                            {% endmatch %}
-                        </p>
-                        <span class="dtx-activity-item__loading htmx-indicator">Loading...</span>
-                    </button>
-                    <button class="absolute top-2 right-2 text-gray-600 hover:text-status-error text-xs opacity-0 group-hover:opacity-100 transition-opacity"
-                            hx-delete="/htmx/services/{{ service.name }}"
-                            hx-confirm="Delete service {{ service.name }}?"
-                            hx-swap="none"
-                            hx-on::after-request="if(event.detail.successful) window.location.reload()"
-                            onclick="event.stopPropagation()"
-                            title="Delete {{ service.name }}">
-                        &#x2715;
-                    </button>
-                    </div>
-                    {% endfor %}
-                {% endif %}
+                 id="sidebar-context-list">
+                {% include "partials/sidebar_services.html" %}
             </div>
 
-            <!-- Bulk Action -->
+            <!-- Bulk Action (processes view only) -->
             {% if has_services %}
-            <footer class="dtx-activity-feed__footer">
+            <footer class="dtx-activity-feed__footer" id="sidebar-footer">
                 <button id="bulk-action-btn"
                         class="dtx-btn {% if running_count > 0 %}dtx-btn--danger{% else %}dtx-btn--success{% endif %} flex-1"
                         onclick="toggleBulkAction()">
@@ -169,28 +143,34 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
             <div class="dtx-signal-filter__search">
                 <input type="text"
                        id="graph-search"
-                       placeholder="Filter services..."
+                       placeholder="Filter nodes..."
+                       aria-label="Filter graph nodes"
                        oninput="filterServices(this.value)"
                        autocomplete="off">
             </div>
             <div class="dtx-signal-filter__toggles">
-                <button id="filter-all"
-                        class="dtx-signal-filter__toggle dtx-signal-filter__toggle--active"
-                        onclick="setFilterMode('all')">
-                    All
-                </button>
-                <button id="filter-deps"
+                <button id="impact-toggle"
                         class="dtx-signal-filter__toggle"
-                        onclick="setFilterMode('dependencies')">
-                    Dependencies
+                        onclick="toggleImpactMode()">
+                    Impact Mode
                 </button>
             </div>
         </div>
 
         <!-- Graph Container -->
         <div class="dtx-graph" id="graph-container">
-            <svg id="service-graph" width="100%" height="100%"></svg>
-            <div class="dtx-graph__grid"></div>
+        </div>
+        <!-- Zoom Controls -->
+        <div class="dtx-graph-controls">
+            <button onclick="window.knowledgeGraph?.zoomIn()" title="Zoom in">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <button onclick="window.knowledgeGraph?.zoomOut()" title="Zoom out">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <button onclick="window.knowledgeGraph?.fitToView()" title="Fit to view">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
         </div>
         {% else %}
         <!-- Empty Graph State -->
@@ -229,6 +209,7 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
                 <div>
                     <label class="block text-xs font-mono text-gray-400 mb-1">Name</label>
                     <input type="text" name="name" required id="add-service-name"
+                           aria-label="Service name"
                            placeholder="e.g., postgres"
                            style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
                            onfocus="this.style.borderColor='var(--dtx-cyan)'"
@@ -237,6 +218,7 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
                 <div>
                     <label class="block text-xs font-mono text-gray-400 mb-1">Command</label>
                     <input type="text" name="command" required
+                           aria-label="Service command"
                            placeholder="e.g., postgres -D $PGDATA"
                            style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
                            onfocus="this.style.borderColor='var(--dtx-cyan)'"
@@ -246,6 +228,7 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
                     <div>
                         <label class="block text-xs font-mono text-gray-400 mb-1">Package <span style="color: var(--dtx-text-muted);">(optional)</span></label>
                         <input type="text" name="package"
+                               aria-label="Nix package"
                                placeholder="e.g., postgresql"
                                style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
                                onfocus="this.style.borderColor='var(--dtx-cyan)'"
@@ -254,6 +237,7 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
                     <div>
                         <label class="block text-xs font-mono text-gray-400 mb-1">Port <span style="color: var(--dtx-text-muted);">(optional)</span></label>
                         <input type="number" name="port"
+                               aria-label="Service port"
                                placeholder="e.g., 5432"
                                style="width: 100%; padding: 8px 12px; background: var(--dtx-bg-tertiary); border: 1px solid var(--dtx-border-subtle); border-radius: 6px; color: var(--dtx-text-primary); font-family: var(--dtx-font-mono); font-size: 0.875rem;"
                                onfocus="this.style.borderColor='var(--dtx-cyan)'"
@@ -279,6 +263,7 @@ SECTOR: LOCAL // STATUS: {% if running_count > 0 %}<span class="text-status-runn
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/js/service-graph.js"></script>
 <script>
 // Add Service modal
 function showAddServiceModal() {
@@ -431,198 +416,163 @@ function filterServices(query) {
     });
 
     // Filter graph nodes if graph exists
-    if (window.serviceGraph) {
-        window.serviceGraph.filter(query);
+    if (window.knowledgeGraph) {
+        window.knowledgeGraph.filter(query);
     }
 }
 
-let filterMode = 'all';
-function setFilterMode(mode) {
-    filterMode = mode;
-    document.getElementById('filter-all').classList.toggle('dtx-signal-filter__toggle--active', mode === 'all');
-    document.getElementById('filter-deps').classList.toggle('dtx-signal-filter__toggle--active', mode === 'dependencies');
+// Sidebar collapse state management
+const SIDEBAR_STATES = ['expanded', 'rail', 'hidden'];
 
-    if (window.serviceGraph) {
-        window.serviceGraph.setMode(mode);
+function getSidebarState() {
+  return document.querySelector('.dtx-command-center')?.dataset.sidebar || 'expanded';
+}
+
+function setSidebarState(state) {
+  const el = document.querySelector('.dtx-command-center');
+  if (!el) return;
+  el.dataset.sidebar = state;
+  localStorage.setItem('dtx-sidebar', state);
+  const sb = el.querySelector('.dtx-command-center__sidebar');
+  if (sb) {
+    const handler = (e) => {
+      if (e.propertyName === 'width') {
+        sb.removeEventListener('transitionend', handler);
+        window.knowledgeGraph?.resize();
+      }
+    };
+    sb.addEventListener('transitionend', handler);
+  }
+}
+
+function cycleSidebar() {
+  const i = SIDEBAR_STATES.indexOf(getSidebarState());
+  setSidebarState(SIDEBAR_STATES[(i + 1) % 3]);
+}
+
+// Restore sidebar state on load
+(function() {
+  const s = localStorage.getItem('dtx-sidebar');
+  if (s && SIDEBAR_STATES.includes(s)) {
+    const el = document.querySelector('.dtx-command-center');
+    if (el) el.dataset.sidebar = s;
+  }
+})();
+
+// Rail tooltips (fixed-positioned in body to escape grid clipping)
+(function initRailTooltips() {
+  let tip = null;
+  document.querySelectorAll('.dtx-view-item[data-tooltip]').forEach(el => {
+    el.addEventListener('mouseenter', () => {
+      if (getSidebarState() !== 'rail') return;
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.className = 'dtx-rail-tooltip';
+        document.body.appendChild(tip);
+      }
+      tip.textContent = el.dataset.tooltip;
+      const rect = el.getBoundingClientRect();
+      tip.style.left = (rect.right + 8) + 'px';
+      tip.style.top = (rect.top + rect.height / 2) + 'px';
+      tip.style.transform = 'translateY(-50%)';
+      tip.style.opacity = '1';
+    });
+    el.addEventListener('mouseleave', () => {
+      if (tip) tip.style.opacity = '0';
+    });
+  });
+})();
+
+// Sidebar header config per view
+const SIDEBAR_VIEWS = {
+  knowledge: { icon: '&#x25CE;', title: 'ENTITIES' },
+  processes: { icon: '&#x25CF;', title: 'SERVICES', action: '+' },
+  code:      { icon: '&#x25C6;', title: 'SYMBOLS' },
+  memories:  { icon: '&#x25A0;', title: 'MEMORIES' },
+  files:     { icon: '&#x25B2;', title: 'FILES' },
+};
+
+function updateSidebarHeader(view) {
+  const cfg = SIDEBAR_VIEWS[view];
+  if (!cfg) return;
+  const iconEl = document.getElementById('sidebar-header-icon');
+  const titleEl = document.getElementById('sidebar-header-title');
+  const actionsEl = document.getElementById('sidebar-header-actions');
+  if (iconEl) iconEl.innerHTML = cfg.icon;
+  if (titleEl) titleEl.textContent = cfg.title;
+  if (actionsEl) {
+    if (cfg.action) {
+      actionsEl.innerHTML = `
+        <span class="dtx-activity-feed__count" id="sidebar-header-count"></span>
+        <button onclick="showAddServiceModal()"
+                class="text-gray-500 hover:text-status-active text-sm leading-none"
+                title="Add Service">+</button>`;
+    } else {
+      actionsEl.innerHTML = '<span class="dtx-activity-feed__count" id="sidebar-header-count"></span>';
     }
+  }
+}
+
+// View switching
+function switchView(view) {
+    document.querySelectorAll('.dtx-view-item').forEach(el => el.classList.remove('dtx-view-item--active'));
+    document.getElementById('view-' + view)?.classList.add('dtx-view-item--active');
+    window.knowledgeGraph?.setView(view);
+
+    // Update sidebar list via HTMX
+    htmx.ajax('GET', `/htmx/partials/sidebar/${view}`, {
+      target: '#sidebar-context-list',
+      swap: 'innerHTML'
+    });
+
+    // Update header
+    updateSidebarHeader(view);
+}
+
+// Select a node in the graph from sidebar click
+function selectGraphNode(nodeId) {
+    window.knowledgeGraph?.focusNode(nodeId);
+}
+
+// Impact mode toggle
+function toggleImpactMode() {
+    const btn = document.getElementById('impact-toggle');
+    const isActive = btn.classList.toggle('dtx-signal-filter__toggle--active');
+    window.knowledgeGraph?.enableImpactMode(isActive);
 }
 
 {% if has_project && has_services %}
-// Initialize D3 service graph
-(function initServiceGraph() {
+// Initialize Knowledge Graph
+(function initKnowledgeGraph() {
     const container = document.getElementById('graph-container');
-    const svg = d3.select('#service-graph');
+    if (!container) return;
 
-    // Service data - status will be set from window.serviceStates
-    const services = [
-        {% for service in services %}
-        {
-            id: "{{ service.name }}",
-            name: "{{ service.name }}",
-            status: window.serviceStates?.["{{ service.name }}"] || "stopped",
-            port: {% match service.port %}{% when Some with (port) %}{{ port }}{% when None %}null{% endmatch %},
-            package: {% match service.package %}{% when Some with (pkg) %}"{{ pkg }}"{% when None %}null{% endmatch %}
-        },
-        {% endfor %}
-    ];
+    window.knowledgeGraph = new KnowledgeGraph(container);
+    window.knowledgeGraph.init();
 
-    // Dependencies
-    const links = [];
-    {% for service in services %}
-    {% match service.depends_on %}
-    {% when Some with (depends_on) %}
-    {% for dep in depends_on %}
-    {
-        // Find service by name
-        const source = services.find(s => s.name === "{{ dep.service }}");
-        if (source) {
-            links.push({ source: source.id, target: "{{ service.name }}" });
-        }
-    }
-    {% endfor %}
-    {% when None %}
-    {% endmatch %}
-    {% endfor %}
-
-    // Get dimensions
-    const width = container.clientWidth;
-    const height = container.clientHeight || 500;
-
-    svg.attr('viewBox', [0, 0, width, height]);
-
-    // Status colors
-    const statusColors = {
-        running: '#22c55e',
-        starting: '#f59e0b',
-        stopped: '#6b7280',
-        error: '#ec4899',
-        disabled: '#3d444d'
-    };
-
-    // Create force simulation
-    const simulation = d3.forceSimulation(services)
-        .force('link', d3.forceLink(links).id(d => d.id).distance(100))
-        .force('charge', d3.forceManyBody().strength(-300))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collision', d3.forceCollide().radius(50));
-
-    // Draw links
-    const link = svg.append('g')
-        .attr('class', 'links')
-        .selectAll('line')
-        .data(links)
-        .join('line')
-        .attr('stroke', '#2d333b')
-        .attr('stroke-width', 2)
-        .attr('stroke-dasharray', '4,4');
-
-    // Draw nodes
-    const node = svg.append('g')
-        .attr('class', 'nodes')
-        .selectAll('g')
-        .data(services)
-        .join('g')
-        .attr('class', 'node')
-        .call(d3.drag()
-            .on('start', dragstarted)
-            .on('drag', dragged)
-            .on('end', dragended));
-
-    // Node circles
-    node.append('circle')
-        .attr('r', 30)
-        .attr('fill', '#161b22')
-        .attr('stroke', d => statusColors[d.status] || statusColors.stopped)
-        .attr('stroke-width', 2);
-
-    // Node labels
-    node.append('text')
-        .attr('dy', 4)
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#e6edf3')
-        .attr('font-size', '10px')
-        .attr('font-family', 'JetBrains Mono, monospace')
-        .text(d => d.name.substring(0, 6).toUpperCase());
-
-    // Port labels
-    node.filter(d => d.port)
-        .append('text')
-        .attr('dy', 45)
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#6b7280')
-        .attr('font-size', '9px')
-        .text(d => `:${d.port}`);
-
-    // Click handler
-    node.on('click', function(event, d) {
-        htmx.ajax('GET', `/htmx/services/${d.name}`, {target: '#detail-panel', swap: 'innerHTML'});
-        openDetailPanel();
-    });
-
-    // Simulation tick
-    simulation.on('tick', () => {
-        link
-            .attr('x1', d => d.source.x)
-            .attr('y1', d => d.source.y)
-            .attr('x2', d => d.target.x)
-            .attr('y2', d => d.target.y);
-
-        node.attr('transform', d => `translate(${d.x},${d.y})`);
-    });
-
-    // Drag functions
-    function dragstarted(event, d) {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
-    }
-
-    function dragged(event, d) {
-        d.fx = event.x;
-        d.fy = event.y;
-    }
-
-    function dragended(event, d) {
-        if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
-    }
-
-    // Update status from SSE
+    // Expose for SSE updates
     window.updateServiceStatus = function(serviceName, status) {
-        const service = services.find(s => s.name === serviceName);
-        if (service) {
-            service.status = status;
-            node.select('circle')
-                .filter(d => d.name === serviceName)
-                .attr('stroke', statusColors[status] || statusColors.stopped);
+        if (window.knowledgeGraph) {
+            window.knowledgeGraph.updateNodeStatus(serviceName, status);
         }
 
         // Update counts
-        const running = services.filter(s => s.status === 'running').length;
-        const errors = services.filter(s => s.status === 'error').length;
+        const statuses = window.serviceStates || {};
+        const running = Object.values(statuses).filter(s => s === 'running').length;
+        const errors = Object.values(statuses).filter(s => s === 'error').length;
         document.getElementById('running-count').textContent = running;
         document.getElementById('error-count').textContent = errors;
     };
 
-    // Graph API
-    window.serviceGraph = {
-        filter: (query) => {
-            const q = query.toLowerCase();
-            node.style('opacity', d => d.name.toLowerCase().includes(q) || !q ? 1 : 0.2);
-        },
-        setMode: (mode) => {
-            // TODO: Implement dependency-only view
-        }
-    };
-
     // Handle resize
-    window.addEventListener('resize', () => {
-        const newWidth = container.clientWidth;
-        const newHeight = container.clientHeight || 500;
-        svg.attr('viewBox', [0, 0, newWidth, newHeight]);
-        simulation.force('center', d3.forceCenter(newWidth / 2, newHeight / 2));
-        simulation.alpha(0.3).restart();
+    window.addEventListener('resize', () => window.knowledgeGraph?.resize());
+})();
+
+// Load initial sidebar content for the active view
+(function initSidebar() {
+    htmx.ajax('GET', '/htmx/partials/sidebar/knowledge', {
+        target: '#sidebar-context-list',
+        swap: 'innerHTML'
     });
 })();
 {% endif %}
@@ -825,6 +775,19 @@ function handleServerShutdown(source) {
             }, 1000);
         } catch (e) {
             console.warn('config_changed parse error:', e);
+        }
+    });
+
+    eventsSource.addEventListener('graph_changed', function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('Graph changed:', data);
+            // Re-fetch graph with current view
+            if (window.knowledgeGraph) {
+                window.knowledgeGraph.setView(window.knowledgeGraph.currentView);
+            }
+        } catch (e) {
+            console.warn('graph_changed parse error:', e);
         }
     });
 

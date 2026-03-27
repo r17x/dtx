@@ -61,14 +61,28 @@ pub fn create_router(state: AppState) -> Router {
         .route("/export", get(handlers::api::export_config))
         .route("/import", post(handlers::api::import_config))
         // Dependency graph
-        .route("/graph", get(handlers::api::get_dependency_graph))
+        .route("/graph", get(handlers::api::get_graph))
+        .route("/graph/expand/*node_id", get(handlers::api::expand_node))
+        .route("/graph/impact/:id", get(handlers::api::get_impact))
+        .route("/graph/stats", get(handlers::api::get_graph_stats))
         .route(
             "/services/:name/deps",
             put(handlers::api::update_dependencies),
         )
         // CLI compatibility routes (project-scoped paths)
         .route("/projects/:id/stop", post(handlers::api::stop_services))
-        .route("/projects/:id/status", get(handlers::api::get_status));
+        .route("/projects/:id/status", get(handlers::api::get_status))
+        // Multi-project management
+        .route(
+            "/projects/register",
+            post(handlers::api::register_project),
+        )
+        .route("/projects", get(handlers::api::list_projects))
+        .route(
+            "/projects/:id/activate",
+            put(handlers::api::activate_project),
+        )
+        .route("/projects/:id", delete(handlers::api::remove_project));
 
     // HTML routes (full pages)
     let html_routes = Router::new()
@@ -123,7 +137,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/partials/import-form", get(handlers::htmx::import_form))
         .route("/import", post(handlers::htmx::do_import))
         .route("/partials/export-panel", get(handlers::htmx::export_panel))
-        .route("/partials/graph", get(handlers::htmx::graph_panel));
+        .route("/partials/graph", get(handlers::htmx::graph_panel))
+        .route(
+            "/partials/sidebar/:view",
+            get(handlers::htmx::sidebar_list),
+        )
+        .route(
+            "/partials/project-switcher",
+            get(handlers::htmx::project_switcher),
+        );
 
     // SSE routes (Server-Sent Events)
     let sse_routes = Router::new()

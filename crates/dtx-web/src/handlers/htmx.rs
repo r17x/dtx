@@ -1,9 +1,10 @@
 //! HTMX partial handlers.
 
+use askama::Template as AskamaRender;
 use askama_axum::Template;
 use axum::extract::{Path, Query, State};
 use axum::Form;
-use dtx_core::graph::DependencyGraph;
+use dtx_core::graph::SymbolSource;
 use dtx_core::model::Service as ModelService;
 use serde::{Deserialize, Deserializer};
 
@@ -11,6 +12,8 @@ use crate::error::{AppError, AppResult};
 use crate::service::ops::CreateServiceParams;
 use crate::state::AppState;
 use crate::types::PackageAnalysis;
+
+use super::api;
 
 /// Deserialize an empty form field as `None` instead of failing.
 fn empty_string_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -89,12 +92,8 @@ pub struct SearchResultsTemplate {
 #[derive(Deserialize)]
 pub struct SearchParams {
     pub q: String,
-    #[serde(default = "default_limit")]
+    #[serde(default = "crate::config::WebConfig::default_search_limit")]
     pub limit: usize,
-}
-
-fn default_limit() -> usize {
-    crate::config::WebConfig::default().default_search_limit
 }
 
 /// Render the search results partial.
@@ -302,7 +301,8 @@ pub async fn add_mapping(
     let ops = state.service_ops();
     ops.add_mapping(&form.command, &form.package).await?;
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
     drop(store);
 
@@ -320,7 +320,8 @@ pub async fn remove_mapping(
     let ops = state.service_ops();
     ops.remove_mapping(&command).await?;
 
-    let store = state.store().read().await;
+    let store_lock = state.store();
+    let store = store_lock.read().await;
     let project_root = store.project_root().to_path_buf();
     drop(store);
 
@@ -404,12 +405,8 @@ pub async fn import_form() -> AppResult<ImportFormTemplate> {
 #[derive(Deserialize)]
 pub struct ImportForm {
     pub content: String,
-    #[serde(default = "default_htmx_import_format")]
+    #[serde(default = "crate::config::WebConfig::default_import_format")]
     pub format: String,
-}
-
-fn default_htmx_import_format() -> String {
-    "auto".to_string()
 }
 
 #[derive(Template)]
@@ -455,17 +452,201 @@ pub async fn export_panel() -> AppResult<ExportPanelTemplate> {
 
 #[derive(Template)]
 #[template(path = "partials/graph_panel.html")]
-pub struct GraphPanelTemplate {
-    pub graph_json: String,
+pub struct GraphPanelTemplate {}
+
+pub async fn graph_panel(State(_state): State<AppState>) -> AppResult<GraphPanelTemplate> {
+    Ok(GraphPanelTemplate {})
 }
 
-pub async fn graph_panel(State(state): State<AppState>) -> AppResult<GraphPanelTemplate> {
-    let store = state.store().read().await;
-    let services = dtx_core::model::services_from_config(store.config());
-    let graph = DependencyGraph::from_services(&services);
+// === Sidebar Contextual Lists ===
 
-    let graph_json = serde_json::to_string(&graph)
-        .map_err(|e| AppError::internal(format!("Failed to serialize graph: {}", e)))?;
+/// Render an Askama template into an `Html` response.
+fn render_partial(tmpl: &impl AskamaRender) -> AppResult<axum::response::Html<String>> {
+    Ok(axum::response::Html(
+        tmpl.render()
+            .map_err(|e| AppError::internal(format!("Template error: {e}")))?,
+    ))
+}
 
-    Ok(GraphPanelTemplate { graph_json })
+#[derive(Template)]
+#[template(path = "partials/sidebar_symbols.html")]
+pub struct SidebarSymbolsTemplate {
+    pub symbols: Vec<SymbolSource>,
+}
+
+/// A memory entry for sidebar display.
+pub struct SidebarMemory {
+    pub name: String,
+    pub kind: String,
+    pub preview: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_memories.html")]
+pub struct SidebarMemoriesTemplate {
+    pub memories: Vec<SidebarMemory>,
+}
+
+/// A file entry for sidebar display.
+pub struct SidebarFile {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_files.html")]
+pub struct SidebarFilesTemplate {
+    pub files: Vec<SidebarFile>,
+}
+
+/// An entity entry for sidebar display (knowledge view — top connected nodes).
+pub struct SidebarEntity {
+    pub id: String,
+    pub domain: String,
+    pub label: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/sidebar_entities.html")]
+pub struct SidebarEntitiesTemplate {
+    pub entities: Vec<SidebarEntity>,
+}
+
+/// Sidebar services list (reuses existing template).
+#[derive(Template)]
+#[template(path = "partials/sidebar_services.html")]
+pub struct SidebarServicesTemplate {
+    pub services: Vec<ModelService>,
+}
+
+/// Render sidebar list content based on the current view.
+pub async fn sidebar_list(
+    State(state): State<AppState>,
+    Path(view): Path<String>,
+) -> AppResult<axum::response::Html<String>> {
+    match view.as_str() {
+        "processes" => {
+            let services = state.service_ops().list_services().await?;
+            render_partial(&SidebarServicesTemplate { services })
+        }
+        "code" => {
+            let symbols = api::collect_symbols(&state);
+            render_partial(&SidebarSymbolsTemplate { symbols })
+        }
+        "memories" => {
+            let memories: Vec<SidebarMemory> = api::collect_memories(&state)
+                .into_iter()
+                .map(|m| SidebarMemory {
+                    name: m.name,
+                    kind: m.kind,
+                    preview: if m.content_preview.len() > 80 {
+                        format!("{}...", &m.content_preview[..80])
+                    } else {
+                        m.content_preview
+                    },
+                })
+                .collect();
+            render_partial(&SidebarMemoriesTemplate { memories })
+        }
+        "files" => {
+            let files: Vec<SidebarFile> = api::collect_files(&state)
+                .into_iter()
+                .map(|f| {
+                    let name = std::path::Path::new(&f.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&f.path)
+                        .to_string();
+                    SidebarFile {
+                        name,
+                        path: f.path,
+                    }
+                })
+                .collect();
+            render_partial(&SidebarFilesTemplate { files })
+        }
+        "knowledge" => {
+            let store_lock = state.store();
+            let store = store_lock.read().await;
+            let services = dtx_core::model::services_from_config(store.config());
+            drop(store);
+            let graph = api::build_graph(&state, &services);
+
+            let mut edge_count: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for edge in &graph.edges {
+                *edge_count.entry(&edge.source).or_default() += 1;
+                *edge_count.entry(&edge.target).or_default() += 1;
+            }
+
+            let mut entities: Vec<SidebarEntity> = graph
+                .nodes
+                .values()
+                .map(|n| SidebarEntity {
+                    id: n.id.clone(),
+                    domain: format!("{:?}", n.domain).to_lowercase(),
+                    label: n.label.clone(),
+                })
+                .collect();
+
+            entities.sort_by(|a, b| {
+                let ca = edge_count.get(a.id.as_str()).copied().unwrap_or(0);
+                let cb = edge_count.get(b.id.as_str()).copied().unwrap_or(0);
+                cb.cmp(&ca)
+            });
+            entities.truncate(50);
+
+            render_partial(&SidebarEntitiesTemplate { entities })
+        }
+        _ => Err(AppError::bad_request(format!(
+            "Unknown sidebar view: '{view}'"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project switcher
+// ---------------------------------------------------------------------------
+
+pub struct ProjectSwitcherEntry {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Template)]
+#[template(path = "partials/project_switcher.html")]
+pub struct ProjectSwitcherTemplate {
+    pub active_name: String,
+    pub projects: Vec<ProjectSwitcherEntry>,
+}
+
+/// Render the project switcher dropdown.
+pub async fn project_switcher(State(state): State<AppState>) -> AppResult<ProjectSwitcherTemplate> {
+    let list = state.registry().list();
+    let active = state.registry().active();
+    let active_store = active.store().read().await;
+    let active_name = active_store.project_name().to_string();
+    drop(active_store);
+
+    let mut projects = Vec::new();
+    for (id, root, is_active) in &list {
+        let name = if *is_active {
+            active_name.clone()
+        } else {
+            root.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| id.clone())
+        };
+        projects.push(ProjectSwitcherEntry {
+            id: id.clone(),
+            name,
+            active: *is_active,
+        });
+    }
+
+    Ok(ProjectSwitcherTemplate {
+        active_name,
+        projects,
+    })
 }
