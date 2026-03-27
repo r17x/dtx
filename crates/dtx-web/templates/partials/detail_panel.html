@@ -85,6 +85,14 @@
                 {% when None %}
                 {% endmatch %}
 
+                <!-- Impact -->
+                <div class="dtx-detail-panel__section">
+                    <div class="dtx-detail-panel__section-title">Impact Analysis</div>
+                    <button onclick="highlightImpact('resource:{{ service.name }}')" class="dtx-btn dtx-btn--ghost dtx-btn--sm">
+                        Highlight Impact
+                    </button>
+                </div>
+
                 <!-- Command -->
                 <div class="dtx-detail-panel__section">
                     <div class="dtx-detail-panel__section-title">Command</div>
@@ -164,8 +172,9 @@
 </div>
 
 <script>
+(function() {
 // Detail panel tab switching
-function showDetailTab(tabName) {
+window.showDetailTab = function showDetailTab(tabName) {
     // Hide all tab contents
     document.querySelectorAll('.detail-tab-content').forEach(content => {
         content.classList.add('hidden');
@@ -190,9 +199,9 @@ function showDetailTab(tabName) {
 }
 
 // Log streaming for detail panel
-let detailLogSource = null;
+var detailLogSource = null;
 
-function toggleLogStream(serviceName) {
+window.toggleLogStream = function toggleLogStream(serviceName) {
     const toggleBtn = document.getElementById('log-stream-toggle');
     const output = document.getElementById('detail-logs-output');
 
@@ -231,6 +240,17 @@ function toggleLogStream(serviceName) {
     }
 }
 
+// Impact analysis from detail panel
+window.highlightImpact = function highlightImpact(nodeId) {
+    if (window.knowledgeGraph) {
+        window.knowledgeGraph.enableImpactMode(true);
+        window.knowledgeGraph.showImpact(nodeId);
+        // Update toolbar toggle
+        const btn = document.getElementById('impact-toggle');
+        if (btn) btn.classList.add('dtx-signal-filter__toggle--active');
+    }
+}
+
 // Cleanup when panel is closed
 document.addEventListener('htmx:beforeSwap', function(evt) {
     if (evt.detail.target && evt.detail.target.id === 'detail-panel') {
@@ -240,4 +260,5 @@ document.addEventListener('htmx:beforeSwap', function(evt) {
         }
     }
 });
+})();
 </script>

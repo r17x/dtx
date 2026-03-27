@@ -1,0 +1,14 @@
+{% if entities.is_empty() %}
+<div class="px-4 py-8 text-center dtx-text-muted">
+    <p>No entities in graph</p>
+</div>
+{% else %}
+    {% for entity in entities %}
+    <button class="dtx-activity-item" onclick="selectGraphNode('{{ entity.id }}')">
+        <div class="dtx-activity-item__service">
+            <span class="dtx-activity-item__kind-badge dtx-activity-item__kind-badge--{{ entity.domain }}">{{ entity.domain }}</span>
+            <span>{{ entity.label }}</span>
+        </div>
+    </button>
+    {% endfor %}
+{% endif %}

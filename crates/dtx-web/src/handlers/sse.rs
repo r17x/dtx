@@ -289,6 +289,17 @@ pub async fn events_stream(
                         Some(lifecycle_event) => {
                             let event_type = lifecycle_event.event_type();
                             yield event(event_type, &lifecycle_event);
+
+                            // Graph-affecting events also emit a graph_changed hint
+                            match event_type {
+                                "config_changed" | "memory_changed" => {
+                                    yield event("graph_changed", serde_json::json!({
+                                        "reason": event_type,
+                                        "view_hint": "knowledge"
+                                    }));
+                                }
+                                _ => {}
+                            }
                         }
                         None => {
                             break;

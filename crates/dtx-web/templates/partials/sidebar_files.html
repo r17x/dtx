@@ -1,0 +1,14 @@
+{% if files.is_empty() %}
+<div class="px-4 py-8 text-center dtx-text-muted">
+    <p>No files indexed</p>
+</div>
+{% else %}
+    {% for file in files %}
+    <button class="dtx-activity-item" onclick="selectGraphNode('file:{{ file.path }}')">
+        <div class="dtx-activity-item__service">
+            <span>{{ file.name }}</span>
+        </div>
+        <div class="dtx-activity-item__message">{{ file.path }}</div>
+    </button>
+    {% endfor %}
+{% endif %}

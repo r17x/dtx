@@ -716,7 +716,78 @@ pub fn dtx_onboarding_tools() -> Vec<Tool> {
     ]
 }
 
-/// Get all dtx tools (resource + code + memory + onboarding).
+/// Get graph query tools (3).
+#[cfg(feature = "graph")]
+pub fn dtx_graph_tools() -> Vec<Tool> {
+    vec![
+        Tool::new(
+            "query_graph",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "view": {
+                        "type": "string",
+                        "description": "Graph view: processes, code, memories, files, knowledge (default: knowledge)",
+                        "enum": ["processes", "code", "memories", "files", "knowledge"]
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Filter nodes by domain: resource, symbol, memory, file"
+                    },
+                    "edge_kind": {
+                        "type": "string",
+                        "description": "Filter edges by kind: depends_on, provides, implements, configures, references, documents, calls, contains"
+                    },
+                    "min_confidence": {
+                        "type": "string",
+                        "description": "Minimum edge confidence: speculative, probable, definite",
+                        "enum": ["speculative", "probable", "definite"]
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filter nodes by label substring match"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of nodes to return"
+                    }
+                }
+            }),
+        )
+        .with_description("Query the unified knowledge graph. Filter by view, domain, edge kind, confidence level, or pattern. Returns nodes and edges matching criteria."),
+
+        Tool::new(
+            "get_impact",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "node_id": {
+                        "type": "string",
+                        "description": "Node ID to analyze impact for (e.g. 'resource:postgres', 'symbol:main::handle')"
+                    },
+                    "min_confidence": {
+                        "type": "string",
+                        "description": "Minimum confidence for impact edges: speculative, probable, definite (default: speculative)",
+                        "enum": ["speculative", "probable", "definite"]
+                    }
+                },
+                "required": ["node_id"]
+            }),
+        )
+        .with_description("Analyze impact of a graph node. Shows all transitively affected nodes with distance and confidence. Use for dependency analysis before changes."),
+
+        Tool::new(
+            "graph_status",
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )
+        .with_description("Get graph statistics: total nodes/edges, breakdown by domain, edge kinds, confidence levels, and active domains."),
+    ]
+}
+
+/// Get all dtx tools (resource + code + memory + onboarding + graph).
 #[allow(unused_mut)]
 pub fn dtx_tools() -> Vec<Tool> {
     let mut tools = dtx_resource_tools();
@@ -729,6 +800,9 @@ pub fn dtx_tools() -> Vec<Tool> {
 
     #[cfg(all(feature = "code", feature = "memory"))]
     tools.extend(dtx_onboarding_tools());
+
+    #[cfg(feature = "graph")]
+    tools.extend(dtx_graph_tools());
 
     tools
 }

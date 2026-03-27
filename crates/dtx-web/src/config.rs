@@ -52,6 +52,16 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
+    /// Default search limit for serde `#[serde(default)]` on query params.
+    pub fn default_search_limit() -> usize {
+        Self::default().default_search_limit
+    }
+
+    /// Default import format for serde `#[serde(default)]`.
+    pub fn default_import_format() -> String {
+        "auto".to_string()
+    }
+
     /// Build a `WebConfig` from `DTX_WEB_*` environment variables, falling back
     /// to [`Default`] for any variable that is absent or unparseable.
     pub fn from_env() -> Self {

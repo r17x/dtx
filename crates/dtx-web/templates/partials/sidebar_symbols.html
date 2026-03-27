@@ -1,0 +1,15 @@
+{% if symbols.is_empty() %}
+<div class="px-4 py-8 text-center dtx-text-muted">
+    <p>No symbols indexed</p>
+</div>
+{% else %}
+    {% for sym in symbols %}
+    <button class="dtx-activity-item" onclick="selectGraphNode('symbol:{{ sym.name }}')">
+        <div class="dtx-activity-item__service">
+            <span class="dtx-activity-item__kind-badge">{{ sym.kind }}</span>
+            <span>{{ sym.name }}</span>
+        </div>
+        <div class="dtx-activity-item__message">{{ sym.file }}:{{ sym.line }}</div>
+    </button>
+    {% endfor %}
+{% endif %}
