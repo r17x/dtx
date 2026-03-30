@@ -94,7 +94,7 @@ jobs:
       DTX_VERSION: ${{ needs.setup.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/nix-installer-action@v22
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
@@ -143,7 +143,7 @@ jobs:
       DTX_VERSION: ${{ needs.setup.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/nix-installer-action@v22
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
@@ -334,7 +334,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/nix-installer-action@v22
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-conf: "experimental-features = nix-command flakes pipe-operators"
